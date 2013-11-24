@@ -12,7 +12,9 @@
 #define OUT_DEBUG_LIGHT 13
 
 #include <Servo.h>
+#include <LiquidCrystal.h>
 
+LiquidCrystal lcd(1, 6, 5, 4, 3, 2);
 Servo stopperServo;
 
 void setup() {
@@ -31,25 +33,36 @@ void setup() {
 
 	stopperServo.attach(OUT_STOPPER_SERVO);
 	stopperServo.write(0);
+
+	lcd.begin(16, 2);
 }
 
 void loop() {
+	lcd.clear();
+	lcd.print("Wait pedal!");
 	// NOT on because of PullUp resistor.
 	if (!digitalRead(IN_PEDAL)) {
 		//	Close vice.
 		digitalWrite(OUT_CLOSE_VICE, true);
 
+				
+		lcd.clear();
 		// Wait for target preasure.
+		lcd.print("Wait preasure.");
 		while (analogRead(IN_VICE_PREASURE) < 512) {
 			delay(5);
 		}
 		digitalWrite(OUT_CLOSE_VICE, false);
-
+		
+		lcd.clear();
+		lcd.print("Dropping oil!");
 		//	Drop some oil!
 		digitalWrite(OUT_DROP_OIL, true);
 		delay(500);
 		digitalWrite(OUT_DROP_OIL, false);
-
+		
+		lcd.clear();
+		lcd.print("Wait Piston back.");
 		//	Move piston back a little to prevent scratching noise.... Atchoum!
 		digitalWrite(OUT_PISTON_BACKWARD, true);
 		
@@ -57,11 +70,17 @@ void loop() {
 			delay(1);
 		}
 		digitalWrite(OUT_PISTON_BACKWARD, false);
-
+		
+		lcd.clear();
+		lcd.print("Raising Stopper.");
 		//	Raise Stopper
 		stopperServo.write(179);
 		delay(250);
-
+		
+		lcd.clear();
+		lcd.print("EXTRUDING!!!");
+		lcd.setCursor(0, 1);
+		lcd.print("Move forward.");
 		//	EXTRUDE!!!
 		digitalWrite(OUT_PISTON_FORWARD, true);
 		while (analogRead(IN_PISTON_RANGE) < 900) {
@@ -69,6 +88,8 @@ void loop() {
 		}
 		digitalWrite(OUT_PISTON_FORWARD, false);
 
+		lcd.clear();
+		lcd.print("Move backward.");
 		//	Move back.
 		digitalWrite(OUT_PISTON_BACKWARD, true);
 		while (analogRead(IN_PISTON_RANGE) > 250) {
@@ -76,9 +97,13 @@ void loop() {
 		}
 		digitalWrite(OUT_PISTON_BACKWARD, false);
 
+		lcd.clear();
+		lcd.print("Lowering Stopper");
 		//	Lower Stopper.
 		stopperServo.write(0);
 
+		lcd.clear();
+		lcd.print("Open vice");
 		//	Open vice.
 		digitalWrite(OUT_OPEN_VICE, true);
 		// Wait for vice open micro switch.
