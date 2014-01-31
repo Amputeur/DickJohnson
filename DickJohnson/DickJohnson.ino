@@ -10,7 +10,10 @@
 
 #define MAX_PRESSURE 255
 #define RECALIBRATE_HOLD_TIME 2500
+
+#define POSITION_MULTIPLICATOR 1250
 #define PISTON_POSITION_ZERO_OFFSET 100
+#define PISTON_POSITION_PADDING 0.125f * POSITION_MULTIPLICATOR
 
 #define THREAD_NC true
 #define THREAD_NF false
@@ -47,6 +50,14 @@
 
 #define IN_ANALOG_PRESSURE 0
 
+#define OUT_RAISE_STOP 44
+#define OUT_LOWER_STOP 42
+#define IN_STOP_RAISED 45
+#define IN_STOP_LOWERED 43
+
+#define IN_MANUAL_PISTON_FORWARD 40
+#define IN_MANUAL_PISTON_BACKWARD 41
+
 #define min(a, b) (((a) < (b)) ? (a) : (b))
 #define max(a, b) (((a) < (b)) ? (b) : (a))
 #define clamp(in, low, high) min(max((in), (low)), (high))
@@ -57,8 +68,15 @@ enum Mode {
 	ModeManual,
 	ModeAuto
 };
-
 Mode currentMode = ModeNone;
+
+enum InitState {
+	InitStateWaiting,
+	InitStateZeroing,
+	InitStateCalibrateStroke,
+	InitStateCalibrateStopper
+};
+InitState initState = InitStateWaiting;
 
 enum Message {
 	MessageNone,
@@ -67,22 +85,24 @@ enum Message {
 	MessageConfigModePumpNotStarted,
 	MessageConfigModeNotInitialized,
 	MessageConfigModeZeroInProgress,
+	MessageConfigModeCalibrateStroke,
+	MessageConfigModeCalibrateStropper,
 	MessageConfigModeInitialized,
-	MessagePressHomeWhenStopClear,
 	MessageZeroInProgress,
 
 	MessageCount
 };
 
 String messages[MessageCount][MessageCount] = {
-	{"A BEbit Studio", "    MACHINE."},	//	MessageNone
-	{"Pump not Started", ""},	//	MessageErrorPumpNotStarted
+	{" A BEbit Studio", "    MACHINE."},	//	MessageNone
+	{"Start the pump.", ""},	//	MessageErrorPumpNotStarted
 	{"Init the system", "first."},	//	MessageErrorSystemNotInitialized
-	{"D:      L:", "Pump not Started"},	//	MessageConfigModePumpNotStarted
+	{"D:      L:", "Start the pump."},	//	MessageConfigModePumpNotStarted
 	{"D:      L:", "Press HOME"},	//	MessageConfigModeNotInitialized
 	{"D:      L:", "Zero in progress"},	//	MessageConfigModeZeroInProgress
+	{"D:      L:", "Calc Stroke"},	//	MessageConfigModeCalibrateStroke
+	{"D:      L:", "HOME when clear"},	//	MessageConfigModeCalibrateStropper
 	{"D:      L:", ""},	//	MessageConfigModeInitialized
-	{"Press HOME when", "stop is clear"},	//	MessagePressHomeWhenStopClear
 	{"Zero in progress", ""}	//	MessageZeroInProgress
 };
 
@@ -129,19 +149,29 @@ int prevExtrudeLength;
 bool canReadExtrudeLength = false;
 
 bool pumpStarted = false;
+bool stopRaised = false;
+
 bool initialized = false;
-bool zeroInprogress = false;
 
 UnitType unitType = UNIT_MM;
 ThreadType threadType = THREAD_NC;
 
 unsigned int pistonPosition = 0;
+unsigned int pistonStrokeLength = 0;
+unsigned int stopperSafePosition = 0;
+unsigned int minPistonPosition = 0;
+unsigned int maxPistonPosition = 0;
+
 int currentPressure = 0;
 
 int initModeHomeCount = 0;
 unsigned long homePressTime = -1;
 
 void setup() {
+	//	TODO
+	//	Get pistonStrokeLength from EEPROM
+	//	Get stopperSafePosition from EEPROM
+
 	lcd.begin(16, 2);
 	lcd.clear();
 	UpdateDisplayComplete();
@@ -171,21 +201,38 @@ void setup() {
 
 	SetupPin(IN_HOME, true, true);
 
+	SetupPin(IN_STOP_RAISED, true, true);
+	SetupPin(IN_STOP_LOWERED, true, true);
+	SetupPin(OUT_RAISE_STOP, false);
+	SetupPin(OUT_LOWER_STOP, false);
+
+	SetupPin(IN_MANUAL_PISTON_FORWARD, true, true);
+	SetupPin(IN_MANUAL_PISTON_BACKWARD, true, true);
+
 	SetupPin(13, false);
+
+	Serial.begin(9600);
 }
 
 void loop() {
-	bool pump = !digitalRead(IN_PUMP);
+	bool pump = PURead(IN_PUMP);
 	if (pump != pumpStarted) {
 		pumpStarted = pump;
 		digitalWrite(OUT_PUMP_LED, pumpStarted);
+
+		if (!pumpStarted) {
+			digitalWrite(OUT_VALVE_FORWARD, false);
+			digitalWrite(OUT_VALVE_BACKWARD, false);
+			initState = InitStateWaiting;
+			initModeHomeCount = 0;
+		}
 	}
 
 	currentPressure = analogRead(IN_ANALOG_PRESSURE);
 
-	bool modeInit = !digitalRead(IN_MODE_INIT);
-	bool modeManual = !digitalRead(IN_MODE_MANUAL);
-	bool modeAuto = !digitalRead(IN_MODE_AUTO);
+	bool modeInit = PURead(IN_MODE_INIT);
+	bool modeManual = PURead(IN_MODE_MANUAL);
+	bool modeAuto = PURead(IN_MODE_AUTO);
 
 	if (modeInit && !modeManual && !modeAuto) {
 		if (currentMode != ModeInit) {
@@ -231,8 +278,18 @@ void loop() {
 void LoopInit() {
 	if (!pumpStarted) {
 		currentMessage = MessageConfigModePumpNotStarted;
-	} else if (zeroInprogress) {
-		currentMessage = MessageConfigModeZeroInProgress;
+	} else if (initState != InitStateWaiting) {
+		switch (initState) {
+		case InitStateZeroing:
+			currentMessage = MessageConfigModeZeroInProgress;
+			break;
+		case InitStateCalibrateStroke:
+			currentMessage = MessageConfigModeCalibrateStroke;
+			break;
+		case InitStateCalibrateStopper:
+			currentMessage = MessageConfigModeCalibrateStropper;
+			break;
+		}
 	} else if (initialized) {
 		currentMessage =  MessageConfigModeInitialized;
 	} else {
@@ -241,59 +298,110 @@ void LoopInit() {
 	
 	UpdateDisplayComplete();
 
-	if (zeroInprogress) {
-		//	Check Preasure.
-		if (currentPressure > MAX_PRESSURE) {
-			pistonPosition = PISTON_POSITION_ZERO_OFFSET;
-			attachInterrupt(PISTON_POSITION_ENCODER_A_INTERRUPT, PistonPositionInterrupt, CHANGE);
-
-			digitalWrite(OUT_VALVE_BACKWARD, false);
-			initialized = true;
-			zeroInprogress = false;
-		}
-	} else {
-		//	Wait HOME button.
-		if (!digitalRead(IN_HOME)) {
-			if (homePressTime == -1) {
-				homePressTime = millis();
-			}
-		} else if (homePressTime != -1) {
-			unsigned long heldTime = millis() - homePressTime;
-
-			homePressTime = -1;
-			if (!initialized || initModeHomeCount == 0 || heldTime < RECALIBRATE_HOLD_TIME) {
-				zeroInprogress = true;
-				digitalWrite(OUT_VALVE_BACKWARD, true);	
-				initModeHomeCount = 1;
-			} else {
-				switch (initModeHomeCount) {
-				    case 1:
-				      //	Recalibrate Course.
-				      initModeHomeCount = 2;
-				      break;
-				    case 2:
-				      //	Recalibrate Stopper.
-				      initModeHomeCount = 0;
-				      break;
-				    default:
-				      initModeHomeCount = 0;
-				      break;
-				}
-			}
-			
-		}
+	switch (initState) {
+	case InitStateZeroing:
+		Zeroing();
+		break;
+	case InitStateCalibrateStroke:
+		CalibrateStroke();
+		break;
+	case InitStateCalibrateStopper:
+		CalibrateStopper();
+		break;
+	default:
+		InitWaitHome();
+		break;
 	}
 
 	ReadConfig();
 }
 
+void InitWaitHome() {
+	//	Wait HOME button.
+	if (PURead(IN_HOME)) {
+		if (homePressTime == -1) {
+			homePressTime = millis();
+		} else if (initModeHomeCount > 0 && (millis() - homePressTime) > RECALIBRATE_HOLD_TIME) {
+			lcd.setCursor(15, 1);
+			lcd.print("*");
+		}
+	} else if (homePressTime != -1) {
+		unsigned long heldTime = millis() - homePressTime;
+
+		homePressTime = -1;
+		if (!initialized || initModeHomeCount == 0 || heldTime < RECALIBRATE_HOLD_TIME) {
+			initState = InitStateZeroing;
+			digitalWrite(OUT_VALVE_BACKWARD, true);	
+			initModeHomeCount = 1;
+		} else {
+			switch (initModeHomeCount) {
+			    case 1:
+			      initState = InitStateCalibrateStroke;
+			      initModeHomeCount = 2;
+			      break;
+			    case 2:
+			      initState = InitStateCalibrateStopper;
+			      initModeHomeCount = 0;
+			      break;
+			    default:
+			      initModeHomeCount = 0;
+			      break;
+			}
+		}
+	}
+}
+
+void Zeroing() {
+	if (currentPressure > MAX_PRESSURE) {
+		pistonPosition = PISTON_POSITION_ZERO_OFFSET;
+		minPistonPosition = pistonPosition + PISTON_POSITION_PADDING;
+		attachInterrupt(PISTON_POSITION_ENCODER_A_INTERRUPT, PistonPositionInterrupt, CHANGE);
+
+		digitalWrite(OUT_VALVE_BACKWARD, false);
+		initialized = true;
+		initState = InitStateWaiting;
+	}
+}
+
+void CalibrateStroke() {
+	if (!PURead(IN_STOP_RAISED)) {
+		digitalWrite(OUT_RAISE_STOP, true);
+		digitalWrite(OUT_VALVE_FORWARD, false);
+		return;
+	} else {
+		digitalWrite(OUT_RAISE_STOP, false);
+		digitalWrite(OUT_VALVE_FORWARD, true);
+
+		if (currentPressure > MAX_PRESSURE) {
+			pistonStrokeLength = pistonPosition;
+
+			maxPistonPosition = pistonStrokeLength - PISTON_POSITION_PADDING;
+
+			Serial.println("Max: " + (String)maxPistonPosition);
+
+			digitalWrite(OUT_VALVE_FORWARD, false);
+			initState = InitStateWaiting;
+		}
+	}
+}
+
+void CalibrateStopper() {
+	UpdatePositionManual();
+
+	if (PURead(IN_HOME)) {
+		stopperSafePosition = pistonPosition;
+		Serial.println("Safe: " + (String)stopperSafePosition);
+		initState = InitStateWaiting;
+	}
+}
+
 void ReadConfig() {
 	bool updateDisplay = false;
 
-	bool setSize = !digitalRead(IN_SET_ROD_SIZE);
-	bool setLength = !digitalRead(IN_SET_EXTRUDE_LENGTH);
+	bool setSize = PURead(IN_SET_ROD_SIZE);
+	bool setLength = PURead(IN_SET_EXTRUDE_LENGTH);
 
-	UnitType setUnit = !digitalRead(IN_UNIT_SELECTOR);
+	UnitType setUnit = PURead(IN_UNIT_SELECTOR);
 
 	if (prevRodSize != rodSize) {
 		updateDisplay = true;
@@ -315,8 +423,8 @@ void ReadConfig() {
 		UpdateDisplayExtureLength();
 	}
 
-	bool setRodSizeButton = !digitalRead(IN_SET_ROD_SIZE);
-	bool setExtrudeLengthButton = !digitalRead(IN_SET_EXTRUDE_LENGTH);
+	bool setRodSizeButton = PURead(IN_SET_ROD_SIZE);
+	bool setExtrudeLengthButton = PURead(IN_SET_EXTRUDE_LENGTH);
 
 	if (canReadRodSize && !setRodSizeButton) {
 		detachInterrupt(CONFIG_ENCODER_A_INTERRUPT);
@@ -330,6 +438,38 @@ void ReadConfig() {
 	} else if (!canReadExtrudeLength && setExtrudeLengthButton) {
 		attachInterrupt(CONFIG_ENCODER_A_INTERRUPT, UpdateExtrudeLengthInterrupt, CHANGE);
 		canReadExtrudeLength = true;
+	}
+}
+
+void UpdatePositionManual() {
+	if (PURead(IN_MANUAL_PISTON_FORWARD)) {
+		if (pistonPosition < maxPistonPosition) {
+			digitalWrite(OUT_VALVE_FORWARD, true);
+			digitalWrite(OUT_VALVE_BACKWARD, false);
+		} else {
+			digitalWrite(OUT_VALVE_FORWARD, false);
+			digitalWrite(OUT_VALVE_BACKWARD, false);
+			return;
+		}
+	} else if (PURead(IN_MANUAL_PISTON_BACKWARD)) {
+		if (pistonPosition > minPistonPosition) {
+			digitalWrite(OUT_VALVE_FORWARD, false);
+			digitalWrite(OUT_VALVE_BACKWARD, true);
+		} else {
+			digitalWrite(OUT_VALVE_FORWARD, false);
+			digitalWrite(OUT_VALVE_BACKWARD, false);
+			return;
+		}
+	} else {
+		digitalWrite(OUT_VALVE_FORWARD, false);
+		digitalWrite(OUT_VALVE_BACKWARD, false);
+		return;
+	}
+
+	//	Fail safe.
+	if (currentPressure > MAX_PRESSURE) {
+		digitalWrite(OUT_VALVE_FORWARD, false);
+		digitalWrite(OUT_VALVE_BACKWARD, false);
 	}
 }
 
@@ -447,4 +587,8 @@ void SetupPin(int pin, bool in, bool pullUp) {
 	} else {
 		pinMode(pin, OUTPUT);
 	}
+}
+
+bool PURead(int pin) {
+	return !digitalRead(pin);
 }
