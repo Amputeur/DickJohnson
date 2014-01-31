@@ -21,10 +21,10 @@
 
 #define IN_MODE_INIT 22
 #define IN_MODE_CONFIG 53
-#define IN_MODE_RUN 52
+#define IN_MODE_AUTO 52
 
 #define OUT_MODE_CONFIG_LED 51
-#define OUT_MODE_RUN_LED 50
+#define OUT_MODE_AUTO_LED 50
 #define OUT_MODE_INIT_LED 47
 
 #define IN_UNIT_SELECTOR 23
@@ -34,6 +34,14 @@
 #define min(a, b) (((a) < (b)) ? (a) : (b))
 #define max(a, b) (((a) < (b)) ? (b) : (a))
 #define clamp(in, low, high) min(max((in), (low)), (high))
+
+enum Mode {
+	ModeInit = 1,
+	ModeConfig,
+	ModeAuto
+};
+
+Mode currentMode;
 
 float extrusionTable[11][3] = {
 //	 Size		NC		NF
@@ -76,10 +84,6 @@ bool canReadExtrudeLength = false;
 
 bool initialized = false;
 
-bool wasConfig = false;
-bool wasRun = false;
-bool wasInit = false;
-
 UnitType unitType = UNIT_MM;
 ThreadType threadType = THREAD_NC;
 
@@ -93,10 +97,10 @@ void setup() {
 
 	SetupPin(IN_MODE_INIT, true, true);
 	SetupPin(IN_MODE_CONFIG, true, true);
-	SetupPin(IN_MODE_RUN, true, true);
+	SetupPin(IN_MODE_AUTO, true, true);
 
 	SetupPin(OUT_MODE_INIT_LED, false);
-	SetupPin(OUT_MODE_RUN_LED, false);
+	SetupPin(OUT_MODE_AUTO_LED, false);
 	SetupPin(OUT_MODE_CONFIG_LED, false);
 
 	SetupPin(IN_UNIT_SELECTOR, true, true);
@@ -122,14 +126,13 @@ void SetupPin(int pin, bool in, bool pullUp) {
 void loop() {
 	bool modeInit = !digitalRead(IN_MODE_INIT);
 	bool modeConfig = !digitalRead(IN_MODE_CONFIG);
-	bool modeRun = !digitalRead(IN_MODE_RUN);
+	bool modeAuto = !digitalRead(IN_MODE_AUTO);
 
-	if (modeInit && !modeConfig && !modeRun) {
-		if (!wasInit) {
-			wasRun = wasConfig = false;
-			wasInit = true;
+	if (modeInit && !modeConfig && !modeAuto) {
+		if (currentMode != ModeInit) {
+			currentMode = ModeInit;
 			digitalWrite(OUT_MODE_CONFIG_LED, false);
-			digitalWrite(OUT_MODE_RUN_LED, false);
+			digitalWrite(OUT_MODE_AUTO_LED, false);
 			digitalWrite(OUT_MODE_INIT_LED, true);
 
 			if (canReadRodSize || canReadExtrudeLength) {
@@ -142,22 +145,20 @@ void loop() {
 		//	Can't go into another mode if not initialized. Display an error message on screen.
 		lcd.clear();
 		lcd.print("Select INIT mode");
-	} else if (modeConfig && !modeRun && !modeInit) {
-		if (!wasConfig) {
-			wasRun = wasInit = false;
-			wasConfig = true;
+	} else if (modeConfig && !modeAuto && !modeInit) {
+		if (currentMode != ModeConfig) {
+			currentMode = ModeConfig;
 			digitalWrite(OUT_MODE_INIT_LED, false);
-			digitalWrite(OUT_MODE_RUN_LED, false);
+			digitalWrite(OUT_MODE_AUTO_LED, false);
 			digitalWrite(OUT_MODE_CONFIG_LED, true);
 			canReadRodSize = canReadExtrudeLength = false;
 		}
 		LoopConfig();
-	} else if (!modeConfig && modeRun) {
-		if (!wasRun) {
-			wasConfig = wasInit = false;
-			wasRun = true;
+	} else if (!modeInit && !modeConfig && modeAuto) {
+		if (currentMode != ModeAuto) {
+			currentMode = ModeAuto;
 			digitalWrite(OUT_MODE_INIT_LED, false);
-			digitalWrite(OUT_MODE_RUN_LED, true);
+			digitalWrite(OUT_MODE_AUTO_LED, true);
 			digitalWrite(OUT_MODE_CONFIG_LED, false);
 
 			if (canReadRodSize || canReadExtrudeLength) {
@@ -165,7 +166,7 @@ void loop() {
 				canReadExtrudeLength = canReadRodSize = false;
 			}
 		}
-		LoopRun();
+		LoopAuto();
 	}
 }
 
@@ -223,7 +224,7 @@ void LoopConfig() {
 	}
 }
 
-void LoopRun() {
+void LoopAuto() {
 	
 }
 
