@@ -389,9 +389,15 @@ void CalibrateStopper() {
 	UpdatePositionManual();
 
 	if (PURead(IN_HOME)) {
+		if (homePressTime == -1) {
+			homePressTime = millis();
+		}
+	} else if (homePressTime != -1) {
 		stopperSafePosition = pistonPosition;
 		Serial.println("Safe: " + (String)stopperSafePosition);
 		initState = InitStateWaiting;
+
+		homePressTime = -1;
 	}
 }
 
