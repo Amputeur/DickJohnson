@@ -43,6 +43,7 @@
 #define OUT_VALVE_BACKWARD 27
 
 #define IN_UNIT_SELECTOR 23
+#define IN_THREAD_TYPE_SELECTOR 29
 #define IN_PUMP 25
 #define IN_SET_EXTRUDE_LENGTH 48
 #define IN_SET_ROD_SIZE 49
@@ -55,8 +56,19 @@
 #define IN_STOP_RAISED 45
 #define IN_STOP_LOWERED 43
 
+#define IN_MANUAL_RAISE_STOPPER 36
+#define IN_MANUAL_LOWER_STOPPER 37
+#define IN_MANUAL_OPEN_VICE 38
+#define IN_MANUAL_CLOSE_VICE 39
 #define IN_MANUAL_PISTON_FORWARD 40
 #define IN_MANUAL_PISTON_BACKWARD 41
+
+#define OUT_VICE_OPEN 35
+#define OUT_VICE_CLOSE 34
+
+#define OUT_DROP_OIL 33
+
+#define IN_PEDAL 28
 
 #define min(a, b) (((a) < (b)) ? (a) : (b))
 #define max(a, b) (((a) < (b)) ? (b) : (a))
@@ -84,11 +96,11 @@ enum Message {
 	MessageErrorSystemNotInitialized,
 	MessageConfigModePumpNotStarted,
 	MessageConfigModeNotInitialized,
+	MessageConfigModeMissingConfig,
 	MessageConfigModeZeroInProgress,
 	MessageConfigModeCalibrateStroke,
 	MessageConfigModeCalibrateStropper,
 	MessageConfigModeInitialized,
-	MessageZeroInProgress,
 
 	MessageCount
 };
@@ -99,43 +111,38 @@ String messages[MessageCount][MessageCount] = {
 	{"Init the system", "first."},	//	MessageErrorSystemNotInitialized
 	{"D:      L:", "Start the pump."},	//	MessageConfigModePumpNotStarted
 	{"D:      L:", "Press HOME"},	//	MessageConfigModeNotInitialized
+	{"D:      L:", "Missing Config"},	//	MessageConfigModeMissingConfig
 	{"D:      L:", "Zero in progress"},	//	MessageConfigModeZeroInProgress
 	{"D:      L:", "Calc Stroke"},	//	MessageConfigModeCalibrateStroke
 	{"D:      L:", "HOME when clear"},	//	MessageConfigModeCalibrateStropper
 	{"D:      L:", ""},	//	MessageConfigModeInitialized
-	{"Zero in progress", ""}	//	MessageZeroInProgress
 };
 
 Message currentMessage = MessageNone;
 Message lastMessage = MessageCount;
 
-float extrusionTable[11][3] = {
-//	 Size		NC		NF
-	{0.25f,		1.0f,	1.0f},
-	{0.3125f,	1.0f,	1.0f},
-	{0.375,		1.0f,	1.0f},
-	{0.4375f,	1.0f,	1.0f},
-	{0.5f,		1.0f,	1.0f},
-	{0.625f,	1.0f,	1.0f},
-	{0.75f,		1.0f,	1.0f},
-	{0.875f,	1.0f,	1.0f},
-	{1.0f,		1.0f,	1.0f},
-	{1.125f,	1.0f,	1.0f},
-	{1.25f,		1.0f,	1.0f}
+struct RodSizeParams {
+	float size;
+	float ncExtrudeGain;
+	float nfExtrudeGain;
+	int viceMaxPressure;
+	int extrudeMaxPressure;
+	String name;
 };
 
-String sizeNames[11] = {
-	"  1/4",
-	" 5/16",
-	"  3/8",
-	" 7/16",
-	"  1/2",
-	"  5/8",
-	"  3/4",
-	"  7/8",
-	"1    ",
-	"1 1/8",
-	"1 1/4"
+RodSizeParams extrusionTable[11] = {
+//	 Size		NC		NF		viceP	extrudeP	Name
+	{0.25f,		1.0f,	1.0f,	255,	255,		"  1/4"},
+	{0.3125f,	1.0f,	1.0f,	255,	255,		" 5/16"},
+	{0.375,		1.0f,	1.0f,	255,	255,		"  3/8"},
+	{0.4375f,	1.0f,	1.0f,	255,	255,		" 7/16"},
+	{0.5f,		1.0f,	1.0f,	255,	255,		"  1/2"},
+	{0.625f,	1.0f,	1.0f,	255,	255,		"  5/8"},
+	{0.75f,		1.0f,	1.0f,	255,	255,		"  3/4"},
+	{0.875f,	1.0f,	1.0f,	255,	255,		"  7/8"},
+	{1.0f,		1.0f,	1.0f,	255,	255,		"1    "},
+	{1.125f,	1.0f,	1.0f,	255,	255,		"1 1/8"},
+	{1.25f,		1.0f,	1.0f,	255,	255,		"1 1/4"}
 };
 
 LiquidCrystal lcd(8, 9, 10, 11, 12, 7);
@@ -143,6 +150,8 @@ LiquidCrystal lcd(8, 9, 10, 11, 12, 7);
 int rodSize = 0.75f * ROD_SIZE_MULTIPLICATOR;
 int prevRodSize;
 bool canReadRodSize = false;
+
+int currentRodSizeIndex = -1;
 
 int extrudeLength = 4.0f * EXTRUDE_LENGTH_MULTIPLICATOR;
 int prevExtrudeLength;
@@ -166,6 +175,12 @@ int currentPressure = 0;
 
 int initModeHomeCount = 0;
 unsigned long homePressTime = -1;
+
+bool stopperToHigh = false;
+bool stopperToLow = false;
+
+//	Callbacks
+void (*pressureCallback)() = 0;
 
 void setup() {
 	//	TODO
@@ -208,6 +223,17 @@ void setup() {
 
 	SetupPin(IN_MANUAL_PISTON_FORWARD, true, true);
 	SetupPin(IN_MANUAL_PISTON_BACKWARD, true, true);
+	SetupPin(IN_MANUAL_LOWER_STOPPER, true, true);
+	SetupPin(IN_MANUAL_RAISE_STOPPER, true, true);
+	SetupPin(IN_MANUAL_CLOSE_VICE, true, true);
+	SetupPin(IN_MANUAL_OPEN_VICE, true, true);
+
+	SetupPin(OUT_VICE_OPEN, false);
+	SetupPin(OUT_VICE_CLOSE, false);
+
+	SetupPin(OUT_DROP_OIL, false);
+
+	SetupPin(IN_PEDAL, true, true);
 
 	SetupPin(13, false);
 
@@ -221,14 +247,20 @@ void loop() {
 		digitalWrite(OUT_PUMP_LED, pumpStarted);
 
 		if (!pumpStarted) {
-			digitalWrite(OUT_VALVE_FORWARD, false);
-			digitalWrite(OUT_VALVE_BACKWARD, false);
+			StateChangeCleanup();
 			initState = InitStateWaiting;
 			initModeHomeCount = 0;
 		}
 	}
 
 	currentPressure = analogRead(IN_ANALOG_PRESSURE);
+	if (currentPressure >= MAX_PRESSURE) {
+		if (pressureCallback != 0) {
+			pressureCallback();
+		}
+		digitalWrite(OUT_VALVE_BACKWARD, false);
+		digitalWrite(OUT_VALVE_FORWARD, false);
+	}
 
 	bool modeInit = PURead(IN_MODE_INIT);
 	bool modeManual = PURead(IN_MODE_MANUAL);
@@ -236,9 +268,11 @@ void loop() {
 
 	if (modeInit && !modeManual && !modeAuto) {
 		if (currentMode != ModeInit) {
+			StateChangeCleanup();
 			currentMode = ModeInit;
 
 			initModeHomeCount = 0;
+			initState = InitStateWaiting;
 
 			digitalWrite(OUT_MODE_MANUAL_LED, false);
 			digitalWrite(OUT_MODE_AUTO_LED, false);
@@ -252,6 +286,7 @@ void loop() {
 		LoopInit();
 	} else if (modeManual && !modeAuto && !modeInit) {
 		if (currentMode != ModeManual) {
+			StateChangeCleanup();
 			currentMode = ModeManual;
 			digitalWrite(OUT_MODE_INIT_LED, false);
 			digitalWrite(OUT_MODE_AUTO_LED, false);
@@ -261,6 +296,7 @@ void loop() {
 		LoopManual();
 	} else if (!modeInit && !modeManual && modeAuto) {
 		if (currentMode != ModeAuto) {
+			StateChangeCleanup();
 			currentMode = ModeAuto;
 			digitalWrite(OUT_MODE_INIT_LED, false);
 			digitalWrite(OUT_MODE_AUTO_LED, true);
@@ -272,7 +308,21 @@ void loop() {
 			}
 		}
 		LoopAuto();
+	} else {
+		//	Something went wrong. Cleanup everything!
+		StateChangeCleanup();
 	}
+}
+
+void StateChangeCleanup() {
+	stopperToHigh = stopperToLow = false;
+	digitalWrite(OUT_VALVE_FORWARD, false);
+	digitalWrite(OUT_VALVE_BACKWARD, false);
+	digitalWrite(OUT_RAISE_STOP, false);
+	digitalWrite(OUT_LOWER_STOP, false);
+	digitalWrite(OUT_VICE_OPEN, false);
+	digitalWrite(OUT_VICE_CLOSE, false);
+	digitalWrite(OUT_DROP_OIL, false);
 }
 
 void LoopInit() {
@@ -291,7 +341,11 @@ void LoopInit() {
 			break;
 		}
 	} else if (initialized) {
-		currentMessage =  MessageConfigModeInitialized;
+		if (pistonStrokeLength == 0 || stopperSafePosition == 0) {
+			currentMessage =  MessageConfigModeMissingConfig;
+		} else {
+			currentMessage =  MessageConfigModeInitialized;
+		}
 	} else {
 		currentMessage = MessageConfigModeNotInitialized;
 	}
@@ -331,12 +385,14 @@ void InitWaitHome() {
 		homePressTime = -1;
 		if (!initialized || initModeHomeCount == 0 || heldTime < RECALIBRATE_HOLD_TIME) {
 			initState = InitStateZeroing;
+			pressureCallback = &ZeroingPressureCallback;
 			digitalWrite(OUT_VALVE_BACKWARD, true);	
 			initModeHomeCount = 1;
 		} else {
 			switch (initModeHomeCount) {
 			    case 1:
 			      initState = InitStateCalibrateStroke;
+			      pressureCallback = &CalibrateStrokePressureCallback;
 			      initModeHomeCount = 2;
 			      break;
 			    case 2:
@@ -352,15 +408,16 @@ void InitWaitHome() {
 }
 
 void Zeroing() {
-	if (currentPressure > MAX_PRESSURE) {
-		pistonPosition = PISTON_POSITION_ZERO_OFFSET;
-		minPistonPosition = pistonPosition + PISTON_POSITION_PADDING;
-		attachInterrupt(PISTON_POSITION_ENCODER_A_INTERRUPT, PistonPositionInterrupt, CHANGE);
+}
 
-		digitalWrite(OUT_VALVE_BACKWARD, false);
-		initialized = true;
-		initState = InitStateWaiting;
-	}
+void ZeroingPressureCallback() {
+	pistonPosition = PISTON_POSITION_ZERO_OFFSET;
+	minPistonPosition = pistonPosition + PISTON_POSITION_PADDING;
+	attachInterrupt(PISTON_POSITION_ENCODER_A_INTERRUPT, PistonPositionInterrupt, CHANGE);
+
+	initialized = true;
+	initState = InitStateWaiting;
+	pressureCallback = 0;
 }
 
 void CalibrateStroke() {
@@ -371,17 +428,20 @@ void CalibrateStroke() {
 	} else {
 		digitalWrite(OUT_RAISE_STOP, false);
 		digitalWrite(OUT_VALVE_FORWARD, true);
+	}
+}
 
-		if (currentPressure > MAX_PRESSURE) {
-			pistonStrokeLength = pistonPosition;
+void CalibrateStrokePressureCallback() {
+	if (PURead(IN_STOP_RAISED)) {
+		pistonStrokeLength = pistonPosition;
 
-			maxPistonPosition = pistonStrokeLength - PISTON_POSITION_PADDING;
+		maxPistonPosition = pistonStrokeLength - PISTON_POSITION_PADDING;
 
-			Serial.println("Max: " + (String)maxPistonPosition);
+		Serial.println("Max: " + (String)maxPistonPosition);
 
-			digitalWrite(OUT_VALVE_FORWARD, false);
-			initState = InitStateWaiting;
-		}
+		initState = InitStateWaiting;
+
+		pressureCallback = 0;
 	}
 }
 
@@ -479,12 +539,69 @@ void UpdatePositionManual() {
 	}
 }
 
-void LoopManual() {
+void UpdateStopperManual() {
+	//	Check in safe zone to raise.
+	if (pistonPosition <= stopperSafePosition) {
+		if (PURead(IN_MANUAL_LOWER_STOPPER) && !PURead(IN_STOP_LOWERED)) {
+			stopperToLow = true;
+			digitalWrite(OUT_LOWER_STOP, true);
+		} else if (PURead(IN_MANUAL_RAISE_STOPPER) && !PURead(IN_STOP_RAISED)) {
+			stopperToHigh = true;
+			digitalWrite(OUT_RAISE_STOP, true);
+		}
+	}
+}
 
+void UpdateViceManual() {
+	if (PURead(IN_MANUAL_OPEN_VICE)) {
+		digitalWrite(OUT_VICE_OPEN, true);
+		digitalWrite(OUT_VICE_CLOSE, false);
+	} else if ((PURead(IN_MANUAL_CLOSE_VICE) || PURead(IN_PEDAL))
+		&& currentRodSizeIndex >= 0
+		&& currentPressure <= extrusionTable[currentRodSizeIndex].viceMaxPressure) {
+		digitalWrite(OUT_VICE_OPEN, false);
+		digitalWrite(OUT_VICE_CLOSE, true);
+	} else {
+		digitalWrite(OUT_VICE_OPEN, false);
+		digitalWrite(OUT_VICE_CLOSE, false);
+	}
+}
+
+void LoopManual() {
+	currentMessage = MessageConfigModeInitialized;
+	
+	if (!pumpStarted) {
+		currentMessage = MessageConfigModePumpNotStarted;
+	} else if (stopperToHigh) {
+		if (PURead(IN_STOP_RAISED)) {
+			stopperToHigh = false;
+			digitalWrite(OUT_RAISE_STOP, false);
+		}
+	} else if (stopperToLow) {
+		if (PURead(IN_STOP_LOWERED)) {
+			stopperToLow = false;
+			digitalWrite(OUT_LOWER_STOP, false);
+		}
+	} else if (initialized && pistonStrokeLength > 0 && stopperSafePosition > 0) {
+		UpdatePositionManual();
+		UpdateStopperManual();
+		UpdateViceManual();
+	} else {
+		//	Only allow open vice.
+		if (PURead(IN_MANUAL_OPEN_VICE)) {
+			digitalWrite(OUT_VICE_OPEN, true);
+			digitalWrite(OUT_VICE_CLOSE, false);
+		} else {
+			digitalWrite(OUT_VICE_CLOSE, false);
+			digitalWrite(OUT_VICE_OPEN, false);
+		}
+	}
+
+	UpdateDisplayComplete();
 }
 
 void LoopAuto() {
-	if (!initialized) {
+	if (!initialized || pistonStrokeLength == 0 || stopperSafePosition == 0) {
 		currentMessage = MessageErrorSystemNotInitialized;
 	}
 
@@ -538,7 +655,7 @@ void UpdateDisplayRodSize() {
 	float closest = 999.0f;
 	String result = (String)rodSize;
 	for (int i=0; i<11; i++) {
-		float dist = extrusionTable[i][0] - fSize;
+		float dist = extrusionTable[i].size - fSize;
 		if (dist < 0.0f) {
 			dist *= -1.0f;
 		}
@@ -549,8 +666,10 @@ void UpdateDisplayRodSize() {
 		}
 	}
 
-	if (closestIndex >= 0) {
-		result = sizeNames[closestIndex];
+	currentRodSizeIndex = closestIndex;
+
+	if (currentRodSizeIndex >= 0) {
+		result = extrusionTable[currentRodSizeIndex].name;
 	}
 
 	lcd.setCursor(2, 0);
@@ -579,7 +698,6 @@ void UpdateDisplayExtureLength() {
 		lcd.print((String)major + "." + (minor<10?("0" + (String)minor):(String)minor) + "\"");
 	}
 }
-
 
 //	Helper functions
 void SetupPin(int pin, bool in) {
