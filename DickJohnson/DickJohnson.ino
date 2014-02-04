@@ -1,5 +1,7 @@
 #include <LiquidCrystal.h>
 
+#define CONFIG_VERSION 1
+
 #define MIN_ROD_SIZE 0.25f * ROD_SIZE_MULTIPLICATOR
 #define MAX_ROD_SIZE 1.25f * ROD_SIZE_MULTIPLICATOR
 #define ROD_SIZE_MULTIPLICATOR 2000
@@ -70,10 +72,6 @@
 
 #define IN_PEDAL 28
 
-#define min(a, b) (((a) < (b)) ? (a) : (b))
-#define max(a, b) (((a) < (b)) ? (b) : (a))
-#define clamp(in, low, high) min(max((in), (low)), (high))
-
 enum Mode {
 	ModeNone,
 	ModeInit,
@@ -131,18 +129,18 @@ struct RodSizeParams {
 };
 
 RodSizeParams extrusionTable[11] = {
-//	 Size		NC		NF		viceP	extrudeP	Name
-	{0.25f,		1.0f,	1.0f,	255,	255,		"  1/4"},
-	{0.3125f,	1.0f,	1.0f,	255,	255,		" 5/16"},
-	{0.375,		1.0f,	1.0f,	255,	255,		"  3/8"},
-	{0.4375f,	1.0f,	1.0f,	255,	255,		" 7/16"},
-	{0.5f,		1.0f,	1.0f,	255,	255,		"  1/2"},
-	{0.625f,	1.0f,	1.0f,	255,	255,		"  5/8"},
-	{0.75f,		1.0f,	1.0f,	255,	255,		"  3/4"},
-	{0.875f,	1.0f,	1.0f,	255,	255,		"  7/8"},
-	{1.0f,		1.0f,	1.0f,	255,	255,		"1    "},
-	{1.125f,	1.0f,	1.0f,	255,	255,		"1 1/8"},
-	{1.25f,		1.0f,	1.0f,	255,	255,		"1 1/4"}
+//	 Size		NC			NF			viceP	extrudeP	Name
+	{0.25f,		0.7355f,	0.8035f,	255,	255,		"  1/4"},
+	{0.3125f,	0.7626,		0.8161f,	255,	255,		" 5/16"},
+	{0.375,		0.7772f,	0.8454f,	255,	255,		"  3/8"},
+	{0.4375f,	0.7829f,	0.8409f,	255,	255,		" 7/16"},
+	{0.5f,		0.7950f,	0.8601f,	255,	255,		"  1/2"},
+	{0.625f,	0.8068f,	0.8761f,	255,	255,		"  5/8"},
+	{0.75f,		0.8218f,	0.8841f,	255,	255,		"  3/4"},
+	{0.875f,	0.8301f,	0.8868f,	255,	255,		"  7/8"},
+	{1.0f,		0.8338f,	0.8851f,	255,	255,		"1    "},
+	{1.125f,	0.8321f,	0.8974f,	255,	255,		"1 1/8"},
+	{1.25f,		0.8479f,	0.9072f,	255,	255,		"1 1/4"}
 };
 
 LiquidCrystal lcd(8, 9, 10, 11, 12, 7);
@@ -569,7 +567,7 @@ void UpdateViceManual() {
 
 void LoopManual() {
 	currentMessage = MessageConfigModeInitialized;
-	
+
 	if (!pumpStarted) {
 		currentMessage = MessageConfigModePumpNotStarted;
 	} else if (stopperToHigh) {
