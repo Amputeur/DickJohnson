@@ -1,6 +1,10 @@
 #include <LiquidCrystal.h>
+#include "avr/eeprom.h"
 
-#define CONFIG_VERSION 1
+#define SAVE_DATA_VERSION 1
+#define EEPROM_VERSION_ADDRESS 0
+#define JOB_CONFIG_RING_COUNT 8
+#define ROD_COUNT_RING_COUNT  32
 
 #define MIN_ROD_SIZE 0.25f * ROD_SIZE_MULTIPLICATOR
 #define MAX_ROD_SIZE 1.25f * ROD_SIZE_MULTIPLICATOR
@@ -145,13 +149,19 @@ RodSizeParams extrusionTable[11] = {
 
 LiquidCrystal lcd(8, 9, 10, 11, 12, 7);
 
-int rodSize = 0.75f * ROD_SIZE_MULTIPLICATOR;
+struct JobConfig {
+	unsigned int jobID;
+	int rodSize;
+	int extrudeLength;
+};
+
+JobConfig currentJobConfig;
+
 int prevRodSize;
 bool canReadRodSize = false;
 
 int currentRodSizeIndex = -1;
 
-int extrudeLength = 4.0f * EXTRUDE_LENGTH_MULTIPLICATOR;
 int prevExtrudeLength;
 bool canReadExtrudeLength = false;
 
@@ -179,6 +189,13 @@ bool stopperToLow = false;
 
 //	Callbacks
 void (*pressureCallback)() = 0;
+
+
+byte saveDataVersion = 0;
+int jobConfigRingPosition = 0;
+unsigned long rodCount = 0;
+int rodCountRingPosition = 0;
+bool configSaved = true;
 
 void setup() {
 	//	TODO
@@ -236,6 +253,8 @@ void setup() {
 	SetupPin(13, false);
 
 	Serial.begin(9600);
+
+	LoadEEPROM();
 }
 
 void loop() {
@@ -321,6 +340,18 @@ void StateChangeCleanup() {
 	digitalWrite(OUT_VICE_OPEN, false);
 	digitalWrite(OUT_VICE_CLOSE, false);
 	digitalWrite(OUT_DROP_OIL, false);
+
+	switch (currentMode) {
+	case ModeInit:
+		LeaveModeInit();
+		break;
+	case ModeManual:
+		LeaveModeManual();
+		break;
+	case ModeAuto:
+		LeaveModeAuto();
+		break;
+	}
 }
 
 void LoopInit() {
@@ -435,11 +466,13 @@ void CalibrateStrokePressureCallback() {
 
 		maxPistonPosition = pistonStrokeLength - PISTON_POSITION_PADDING;
 
-		Serial.println("Max: " + (String)maxPistonPosition);
-
 		initState = InitStateWaiting;
 
 		pressureCallback = 0;
+
+		if (pistonStrokeLength != 0 && stopperSafePosition != 0) {
+			SaveSystemSettings();
+		}
 	}
 }
 
@@ -452,10 +485,14 @@ void CalibrateStopper() {
 		}
 	} else if (homePressTime != -1) {
 		stopperSafePosition = pistonPosition;
-		Serial.println("Safe: " + (String)stopperSafePosition);
+		
 		initState = InitStateWaiting;
 
 		homePressTime = -1;
+
+		if (pistonStrokeLength != 0 && stopperSafePosition != 0) {
+			SaveSystemSettings();
+		}
 	}
 }
 
@@ -467,16 +504,20 @@ void ReadConfig() {
 
 	UnitType setUnit = PURead(IN_UNIT_SELECTOR);
 
-	if (prevRodSize != rodSize) {
+	if (prevRodSize != currentJobConfig.rodSize) {
 		updateDisplay = true;
-		prevRodSize = rodSize;
+		prevRodSize = currentJobConfig.rodSize;
 		UpdateDisplayRodSize();
+
+		configSaved = false;
 	}
 
-	if (prevExtrudeLength != extrudeLength) {
+	if (prevExtrudeLength != currentJobConfig.extrudeLength) {
 		updateDisplay = true;
-		prevExtrudeLength = extrudeLength;
+		prevExtrudeLength = currentJobConfig.extrudeLength;
 		UpdateDisplayExtureLength();
+
+		configSaved = false;
 	}
 
 	if (setUnit != unitType) {
@@ -503,6 +544,10 @@ void ReadConfig() {
 		attachInterrupt(CONFIG_ENCODER_A_INTERRUPT, UpdateExtrudeLengthInterrupt, CHANGE);
 		canReadExtrudeLength = true;
 	}
+}
+
+void LeaveModeInit() {
+	SaveJobConfig();
 }
 
 void UpdatePositionManual() {
@@ -598,12 +643,20 @@ void LoopManual() {
 	UpdateDisplayComplete();
 }
 
+void LeaveModeManual() {
+
+}
+
 void LoopAuto() {
 	if (!initialized || pistonStrokeLength == 0 || stopperSafePosition == 0) {
 		currentMessage = MessageErrorSystemNotInitialized;
 	}
 
 	UpdateDisplayComplete();
+}
+
+void LeaveModeAuto() {
+
 }
 
 //	Interrupts
@@ -617,17 +670,17 @@ void PistonPositionInterrupt() {
 
 void UpdateRodSizeInterrupt() {
 	if (digitalRead(CONFIG_ENCODER_A) == digitalRead(CONFIG_ENCODER_B)) {
-		rodSize = min(rodSize + 1, MAX_ROD_SIZE);
+		currentJobConfig.rodSize = min(currentJobConfig.rodSize + 1, MAX_ROD_SIZE);
 	} else {
-		rodSize = max(rodSize - 1, MIN_ROD_SIZE);
+		currentJobConfig.rodSize = max(currentJobConfig.rodSize - 1, MIN_ROD_SIZE);
 	}
 }
 
 void UpdateExtrudeLengthInterrupt() {
 	if (digitalRead(CONFIG_ENCODER_A) == digitalRead(CONFIG_ENCODER_B)) {
-		extrudeLength = min(extrudeLength + 1, MAX_EXTRUDE_LENGTH);
+		currentJobConfig.extrudeLength = min(currentJobConfig.extrudeLength + 1, MAX_EXTRUDE_LENGTH);
 	} else {
-		extrudeLength = max(extrudeLength - 1, MIN_EXTRUDE_LENGTH);
+		currentJobConfig.extrudeLength = max(currentJobConfig.extrudeLength - 1, MIN_EXTRUDE_LENGTH);
 	}
 }
 
@@ -647,11 +700,11 @@ void UpdateDisplayComplete() {
 }
 
 void UpdateDisplayRodSize() {
-	float fSize = (float)rodSize / (float)ROD_SIZE_MULTIPLICATOR;
+	float fSize = (float)currentJobConfig.rodSize / (float)ROD_SIZE_MULTIPLICATOR;
 
 	int closestIndex = -1;
 	float closest = 999.0f;
-	String result = (String)rodSize;
+	String result = (String)currentJobConfig.rodSize;
 	for (int i=0; i<11; i++) {
 		float dist = extrusionTable[i].size - fSize;
 		if (dist < 0.0f) {
@@ -677,7 +730,7 @@ void UpdateDisplayRodSize() {
 void UpdateDisplayExtureLength() {
 	lcd.setCursor(10, 0);
 
-	float fLength = (float)extrudeLength / (float)EXTRUDE_LENGTH_MULTIPLICATOR;
+	float fLength = (float)currentJobConfig.extrudeLength / (float)EXTRUDE_LENGTH_MULTIPLICATOR;
 
 	if (unitType == UNIT_MM) {
 		fLength *= 25.4f;
@@ -690,10 +743,170 @@ void UpdateDisplayExtureLength() {
 		}
 		lcd.print(result + (String)(int)fLength + "mm");
 	} else {
-		int major = extrudeLength / EXTRUDE_LENGTH_MULTIPLICATOR;
-		int minor = 100 * ((float)(extrudeLength % EXTRUDE_LENGTH_MULTIPLICATOR) / (float)EXTRUDE_LENGTH_MULTIPLICATOR);
+		int major = currentJobConfig.extrudeLength / EXTRUDE_LENGTH_MULTIPLICATOR;
+		int minor = 100 * ((float)(currentJobConfig.extrudeLength % EXTRUDE_LENGTH_MULTIPLICATOR) / (float)EXTRUDE_LENGTH_MULTIPLICATOR);
 
 		lcd.print((String)major + "." + (minor<10?("0" + (String)minor):(String)minor) + "\"");
+	}
+}
+
+void LoadEEPROM() {
+	eeprom_busy_wait();
+
+	saveDataVersion = eeprom_read_byte((const byte*)EEPROM_VERSION_ADDRESS);
+
+	if (saveDataVersion == SAVE_DATA_VERSION) {
+
+		//	System Settings.
+		int curAdd = EEPROM_VERSION_ADDRESS + sizeof(saveDataVersion);
+
+		pistonStrokeLength = eeprom_read_word((const unsigned int*)curAdd);
+		curAdd += sizeof(pistonStrokeLength);
+		stopperSafePosition = eeprom_read_word((const unsigned int*)curAdd);
+
+		maxPistonPosition = pistonStrokeLength - PISTON_POSITION_PADDING;
+
+		curAdd += sizeof(stopperSafePosition);
+
+		Serial.print("Reading JobConfig from address: ");
+		Serial.print(curAdd);
+		Serial.print("\n");
+
+		//	JobConfig
+		int highestJobRing = 0;
+		JobConfig highestJobCfg;
+		highestJobCfg.jobID = 0;
+		highestJobCfg.rodSize = 0.75f * ROD_SIZE_MULTIPLICATOR;
+		highestJobCfg.extrudeLength = 4.0f * EXTRUDE_LENGTH_MULTIPLICATOR;
+		JobConfig readJobCfg;
+
+		for (int i=0; i<JOB_CONFIG_RING_COUNT; i++) {
+			int readAdd = curAdd + sizeof(currentJobConfig)*i;
+			eeprom_read_block(&readJobCfg, (const void*)readAdd, sizeof(currentJobConfig));
+
+			if (readJobCfg.jobID > highestJobCfg.jobID) {
+				highestJobCfg = readJobCfg;
+				
+				highestJobRing = i;
+			}
+		}
+		jobConfigRingPosition = highestJobRing;
+
+		currentJobConfig = highestJobCfg;
+
+		Serial.print("--JobConfig--\nID:");
+		Serial.print(currentJobConfig.jobID);
+		Serial.print("\nSize: ");
+		Serial.print(currentJobConfig.rodSize);
+		Serial.print("\nLen: ");
+		Serial.print(currentJobConfig.extrudeLength);
+		Serial.print("\nRing: ");
+		Serial.print(jobConfigRingPosition);
+		Serial.print("\n");
+
+		configSaved = true;
+
+		//	RodCount
+		curAdd += sizeof(currentJobConfig) * JOB_CONFIG_RING_COUNT;
+
+		rodCount = 0ul;
+		unsigned int rodCountI = 0u;
+		for (int i=0; i<ROD_COUNT_RING_COUNT; i++) {
+			rodCountI = eeprom_read_word((const unsigned int*)(curAdd + sizeof(rodCountI)*i));
+
+			rodCount += (long)rodCountI;
+		}
+
+		Serial.print("Lifetime Rod Count: ");
+		Serial.print(rodCount);
+		Serial.print("\n");
+	}
+
+	eeprom_busy_wait();
+}
+
+void SaveSystemSettings() {
+	bool initEEPROM = saveDataVersion != SAVE_DATA_VERSION;
+
+	saveDataVersion = SAVE_DATA_VERSION;
+	int curAdd = EEPROM_VERSION_ADDRESS;
+	if (eeprom_read_byte((byte*)curAdd) != saveDataVersion) {
+		eeprom_write_byte((byte*)curAdd, saveDataVersion);
+	}
+
+	curAdd += sizeof(saveDataVersion);
+
+	if (eeprom_read_word((unsigned int*)curAdd) != pistonStrokeLength) {
+		eeprom_write_word((unsigned int*)curAdd, pistonStrokeLength);
+	}
+	
+	curAdd += sizeof(pistonStrokeLength);
+	if (eeprom_read_word((unsigned int*)curAdd) != stopperSafePosition) {
+		eeprom_write_word((unsigned int*)curAdd, stopperSafePosition);
+	}
+
+	if (initEEPROM) {
+		//	JobConfig area.
+		int eepromReservedSize = sizeof(currentJobConfig) * JOB_CONFIG_RING_COUNT;
+
+		//	Count area.
+		eepromReservedSize += sizeof(unsigned int) * ROD_COUNT_RING_COUNT;
+
+		//	Zero the reserved range!
+		curAdd += sizeof(stopperSafePosition);
+
+		Serial.print("Zeroing ");
+		Serial.print(eepromReservedSize);
+		Serial.print(" bytes of data at address: ");
+		Serial.print(curAdd);
+		Serial.print("\n");
+
+		for (int i=0; i<eepromReservedSize; i++) {
+			if (eeprom_read_byte((const byte*)curAdd + i) != 0) {
+				eeprom_write_byte((byte *)curAdd + i, 0);
+			}
+		}
+	}
+
+	eeprom_busy_wait();
+	Serial.print("Save complete!\n");
+}
+
+int GetJobConfigEEPROMAddress() {
+	return EEPROM_VERSION_ADDRESS + sizeof(saveDataVersion) + sizeof(pistonStrokeLength) + sizeof(stopperSafePosition);
+}
+
+int GetRodCountEEPROM_Address() {
+	return GetJobConfigEEPROMAddress() + sizeof(currentJobConfig)*JOB_CONFIG_RING_COUNT;
+}
+
+void SaveJobConfig() {
+	if (!configSaved && saveDataVersion == SAVE_DATA_VERSION) {
+		currentJobConfig.jobID++;
+
+		jobConfigRingPosition = (jobConfigRingPosition + 1) % JOB_CONFIG_RING_COUNT;
+		int curAdd = GetJobConfigEEPROMAddress() + jobConfigRingPosition*sizeof(currentJobConfig);
+
+		Serial.print("Write JobConfig at address: ");
+		Serial.print(curAdd);
+		Serial.print("\nJobID:");
+		Serial.print(currentJobConfig.jobID);
+		Serial.print("\nSize: ");
+		Serial.print(currentJobConfig.rodSize);
+		Serial.print("\nLen: ");
+		Serial.print(currentJobConfig.extrudeLength);
+		Serial.print("\n");
+
+		eeprom_write_block((void*)&currentJobConfig, (void*)curAdd, sizeof(currentJobConfig));
+
+		eeprom_busy_wait();
+
+		configSaved = true;
+	}
+}
+
+void IncrementCount() {
+	if (saveDataVersion == SAVE_DATA_VERSION) {
 	}
 }
 
