@@ -1,6 +1,8 @@
 #include <LiquidCrystal.h>
 #include "avr/eeprom.h"
 
+#define DEBUG_SERIAL
+
 #define SAVE_DATA_VERSION 1
 #define EEPROM_VERSION_ADDRESS 0
 #define JOB_CONFIG_RING_COUNT 8
@@ -14,13 +16,16 @@
 #define MAX_EXTRUDE_LENGTH 6.0f * EXTRUDE_LENGTH_MULTIPLICATOR
 #define EXTRUDE_LENGTH_MULTIPLICATOR 1250
 
+#define STOPPER_THICKNESS 1.0f * POSITION_MULTIPLICATOR;
+#define STOPPER_PADDING 0.25f * POSITION_MULTIPLICATOR;
+
 #define MAX_PRESSURE 255
 #define RECALIBRATE_HOLD_TIME 2500
 
 #define POSITION_MULTIPLICATOR 1250
 #define PISTON_POSITION_ZERO_OFFSET 100
 #define PISTON_POSITION_PADDING 0.125f * POSITION_MULTIPLICATOR
-
+#define PISTON_POSITION_DESTINATION_THRESHOLD 0.01f * POSITION_MULTIPLICATOR
 #define THREAD_NC true
 #define THREAD_NF false
 #define UNIT_MM true
@@ -125,14 +130,15 @@ Message lastMessage = MessageCount;
 
 struct RodSizeParams {
 	float size;
-	float ncExtrudeGain;
-	float nfExtrudeGain;
+	float ncExtrudeNeeded;
+	float nfExtrudeNeeded;
 	int viceMaxPressure;
 	int extrudeMaxPressure;
 	String name;
 };
 
-RodSizeParams extrusionTable[11] = {
+#define SIZE_COUNT 11
+RodSizeParams extrusionTable[SIZE_COUNT] = {
 //	 Size		NC			NF			viceP	extrudeP	Name
 	{0.25f,		0.7355f,	0.8035f,	255,	255,		"  1/4"},
 	{0.3125f,	0.7626,		0.8161f,	255,	255,		" 5/16"},
@@ -197,6 +203,31 @@ unsigned long rodCount = 0;
 int rodCountRingPosition = 0;
 bool configSaved = true;
 
+
+enum AutoState {
+	AutoStateFirstRunGoHome,
+	AutoStateFirstRunLowerStopper,
+	AutoStateFirstRunOpenVice,
+	AutoStateFirstRunGotoStartPos,
+	AutoStateStartOil,
+	AutoStateWaitPedal,
+	AutoStateClosingVice,
+	AutoStateMoveBackwardForStopper,
+	AutoStateStopOil,
+	AutoStateRaiseStopper,
+	AutoStateMoveForwardExtrude,
+	AutoStateMoveBackwardPostExtrude,
+	AutoStateLowerStopper,
+	AutoStateOpenVice,
+	AutoStateMoveForwardToStartPos
+};
+AutoState autoState = AutoStateFirstRunGoHome;
+
+int autoModeStartPos;
+int autoModeBackPos;
+int autoModeRaiseStopperPos;
+int autoModeExtrudePos;
+
 void setup() {
 	//	TODO
 	//	Get pistonStrokeLength from EEPROM
@@ -252,7 +283,9 @@ void setup() {
 
 	SetupPin(13, false);
 
+#ifdef DEBUG_SERIAL
 	Serial.begin(9600);
+#endif
 
 	LoadEEPROM();
 }
@@ -285,7 +318,7 @@ void loop() {
 
 	if (modeInit && !modeManual && !modeAuto) {
 		if (currentMode != ModeInit) {
-			StateChangeCleanup();
+			StateChangeCleanup(true);
 			currentMode = ModeInit;
 
 			initModeHomeCount = 0;
@@ -303,7 +336,7 @@ void loop() {
 		LoopInit();
 	} else if (modeManual && !modeAuto && !modeInit) {
 		if (currentMode != ModeManual) {
-			StateChangeCleanup();
+			StateChangeCleanup(true);
 			currentMode = ModeManual;
 			digitalWrite(OUT_MODE_INIT_LED, false);
 			digitalWrite(OUT_MODE_AUTO_LED, false);
@@ -313,8 +346,10 @@ void loop() {
 		LoopManual();
 	} else if (!modeInit && !modeManual && modeAuto) {
 		if (currentMode != ModeAuto) {
-			StateChangeCleanup();
+			StateChangeCleanup(true);
 			currentMode = ModeAuto;
+			autoState = AutoStateFirstRunGoHome;
+
 			digitalWrite(OUT_MODE_INIT_LED, false);
 			digitalWrite(OUT_MODE_AUTO_LED, true);
 			digitalWrite(OUT_MODE_MANUAL_LED, false);
@@ -322,6 +357,22 @@ void loop() {
 			if (canReadRodSize || canReadExtrudeLength) {
 				detachInterrupt(CONFIG_ENCODER_A_INTERRUPT);
 				canReadExtrudeLength = canReadRodSize = false;
+			}
+
+			if (currentRodSizeIndex >= 0 && currentRodSizeIndex < SIZE_COUNT) {
+				float len = 1.0f;
+				if (threadType == THREAD_NC) {
+					len = extrusionTable[currentRodSizeIndex].ncExtrudeNeeded;
+				} else {
+					len = extrusionTable[currentRodSizeIndex].nfExtrudeNeeded;
+				}
+
+				float realLen = (float)currentJobConfig.extrudeLength/(float)POSITION_MULTIPLICATOR;
+				autoModeStartPos = maxPistonPosition - (int)(realLen * len * (float)POSITION_MULTIPLICATOR) - STOPPER_THICKNESS;
+				autoModeBackPos = maxPistonPosition - (int)(realLen * (float)POSITION_MULTIPLICATOR) - STOPPER_THICKNESS - STOPPER_PADDING;
+				autoModeRaiseStopperPos = autoModeStartPos - STOPPER_PADDING;
+				autoModeRaiseStopperPos = min(stopperSafePosition, autoModeRaiseStopperPos);
+				autoModeExtrudePos = maxPistonPosition;
 			}
 		}
 		LoopAuto();
@@ -332,6 +383,10 @@ void loop() {
 }
 
 void StateChangeCleanup() {
+	StateChangeCleanup(false);
+}
+
+void StateChangeCleanup(bool leaveMode) {
 	stopperToHigh = stopperToLow = false;
 	digitalWrite(OUT_VALVE_FORWARD, false);
 	digitalWrite(OUT_VALVE_BACKWARD, false);
@@ -341,16 +396,18 @@ void StateChangeCleanup() {
 	digitalWrite(OUT_VICE_CLOSE, false);
 	digitalWrite(OUT_DROP_OIL, false);
 
-	switch (currentMode) {
-	case ModeInit:
-		LeaveModeInit();
-		break;
-	case ModeManual:
-		LeaveModeManual();
-		break;
-	case ModeAuto:
-		LeaveModeAuto();
-		break;
+	if (leaveMode) {
+		switch (currentMode) {
+		case ModeInit:
+			LeaveModeInit();
+			break;
+		case ModeManual:
+			LeaveModeManual();
+			break;
+		case ModeAuto:
+			LeaveModeAuto();
+			break;
+		}
 	}
 }
 
@@ -647,12 +704,163 @@ void LeaveModeManual() {
 
 }
 
+AutoState oldState;
+
 void LoopAuto() {
 	if (!initialized || pistonStrokeLength == 0 || stopperSafePosition == 0) {
 		currentMessage = MessageErrorSystemNotInitialized;
+		UpdateDisplayComplete();
+		return;
+	}
+
+	if (!pumpStarted) {
+		currentMessage = MessageErrorPumpNotStarted;
+		UpdateDisplayComplete();
+		return;
+	}
+
+	if (currentPressure >= MAX_PRESSURE) {
+		//	TODO Error Message.
+		return;
+	}
+
+	if (oldState != autoState) {
+		oldState = autoState;
+		Serial.print("NewState: ");
+		Serial.print(oldState);
+		Serial.print("\n");
+	}
+	switch (autoState) {
+	case AutoStateFirstRunGoHome:
+		if (GotoDestination(minPistonPosition, PISTON_POSITION_DESTINATION_THRESHOLD, HIGH)) {
+			autoState = AutoStateFirstRunLowerStopper;
+		}
+		break;
+	case AutoStateFirstRunLowerStopper:
+		if (MoveStopper(LOW)) {
+			autoState = AutoStateFirstRunOpenVice;
+		}
+		break;
+	case AutoStateFirstRunOpenVice:
+		if (MoveVice(HIGH)) {
+			autoState = AutoStateFirstRunGotoStartPos;
+		}
+		break;
+	case AutoStateFirstRunGotoStartPos:
+		if (GotoDestination(autoModeStartPos, PISTON_POSITION_DESTINATION_THRESHOLD, LOW)) {
+			autoState = AutoStateStartOil;
+		}
+		break;
+	case AutoStateStartOil:
+		digitalWrite(OUT_DROP_OIL, true);
+		autoState = AutoStateWaitPedal;
+		break;
+	case AutoStateWaitPedal:
+		if (PURead(IN_PEDAL)) {
+			autoState = AutoStateClosingVice;
+		}
+		break;
+	case AutoStateClosingVice:
+		if (MoveVice(LOW)) {
+			autoState = AutoStateMoveBackwardForStopper;
+		}
+		break;
+	case AutoStateMoveBackwardForStopper:
+		if (GotoDestination(autoModeRaiseStopperPos, PISTON_POSITION_DESTINATION_THRESHOLD, HIGH)) {
+			autoState = AutoStateLowerStopper;
+		}
+		break;
+	case AutoStateStopOil:
+		digitalWrite(OUT_DROP_OIL, false);
+		autoState = AutoStateRaiseStopper;
+		break;
+	case AutoStateRaiseStopper:
+		if (MoveStopper(HIGH)) {
+			autoState = AutoStateMoveForwardExtrude;
+		}
+		break;
+	case AutoStateMoveForwardExtrude:
+		if (GotoDestination(autoModeExtrudePos, PISTON_POSITION_DESTINATION_THRESHOLD, LOW)) {
+			autoState = AutoStateMoveBackwardPostExtrude;
+		}
+		//	TODO	Check Pressure for this size.
+		break;
+	case AutoStateMoveBackwardPostExtrude:
+		if (GotoDestination(autoModeBackPos, PISTON_POSITION_DESTINATION_THRESHOLD, HIGH)) {
+			autoState = AutoStateLowerStopper;
+		}
+		break;
+	case AutoStateLowerStopper:
+		if (MoveStopper(LOW)) {
+			autoState = AutoStateOpenVice;
+		}
+		break;
+	case AutoStateOpenVice:
+		if (MoveVice(HIGH)) {
+			autoState = AutoStateMoveForwardToStartPos;
+		}
+		break;
+	case AutoStateMoveForwardToStartPos:
+		if (GotoDestination(autoModeStartPos, PISTON_POSITION_DESTINATION_THRESHOLD, LOW)) {
+			autoState = AutoStateStartOil;
+		}
+		break;
 	}
 
 	UpdateDisplayComplete();
+}
+
+bool GotoDestination(int destination, int threshold, bool continueIf) {
+	if (continueIf == HIGH) {
+		if (pistonPosition <= (destination + threshold)) {
+			digitalWrite(OUT_VALVE_BACKWARD, false);
+			digitalWrite(OUT_VALVE_FORWARD, false);
+			return true;
+		} else {
+			digitalWrite(OUT_VALVE_BACKWARD, true);
+			digitalWrite(OUT_VALVE_FORWARD, false);
+		}
+	} else {
+		if (pistonPosition >= (destination - threshold)) {
+			digitalWrite(OUT_VALVE_BACKWARD, false);
+			digitalWrite(OUT_VALVE_FORWARD, false);
+			return true;
+		} else {
+			digitalWrite(OUT_VALVE_BACKWARD, false);
+			digitalWrite(OUT_VALVE_FORWARD, true);
+		}
+	}
+
+	return false;
+}
+
+bool MoveStopper(bool destination) {
+	if (destination == HIGH) {
+		if (PURead(IN_STOP_RAISED)) {
+			digitalWrite(OUT_RAISE_STOP, false);
+			digitalWrite(OUT_LOWER_STOP, false);
+			return true;
+		} else {
+			digitalWrite(OUT_RAISE_STOP, true);
+			digitalWrite(OUT_LOWER_STOP, false);
+		}
+	} else {
+		if (PURead(IN_STOP_LOWERED)) {
+			digitalWrite(OUT_RAISE_STOP, false);
+			digitalWrite(OUT_LOWER_STOP, false);
+			return true;
+		} else {
+			digitalWrite(OUT_RAISE_STOP, false);
+			digitalWrite(OUT_LOWER_STOP, true);
+		}
+	}
+	
+	return false;
+}
+
+bool MoveVice(bool destination) {
+	//	TODO using a Timer
+	return true;
 }
 
 void LeaveModeAuto() {
@@ -705,7 +913,7 @@ void UpdateDisplayRodSize() {
 	int closestIndex = -1;
 	float closest = 999.0f;
 	String result = (String)currentJobConfig.rodSize;
-	for (int i=0; i<11; i++) {
+	for (int i=0; i<SIZE_COUNT; i++) {
 		float dist = extrusionTable[i].size - fSize;
 		if (dist < 0.0f) {
 			dist *= -1.0f;
@@ -767,11 +975,11 @@ void LoadEEPROM() {
 		maxPistonPosition = pistonStrokeLength - PISTON_POSITION_PADDING;
 
 		curAdd += sizeof(stopperSafePosition);
-
+#ifdef DEBUG_SERIAL
 		Serial.print("Reading JobConfig from address: ");
 		Serial.print(curAdd);
 		Serial.print("\n");
-
+#endif
 		//	JobConfig
 		int highestJobRing = 0;
 		JobConfig highestJobCfg;
@@ -793,7 +1001,7 @@ void LoadEEPROM() {
 		jobConfigRingPosition = highestJobRing;
 
 		currentJobConfig = highestJobCfg;
-
+#ifdef DEBUG_SERIAL
 		Serial.print("--JobConfig--\nID:");
 		Serial.print(currentJobConfig.jobID);
 		Serial.print("\nSize: ");
@@ -803,7 +1011,7 @@ void LoadEEPROM() {
 		Serial.print("\nRing: ");
 		Serial.print(jobConfigRingPosition);
 		Serial.print("\n");
-
+#endif
 		configSaved = true;
 
 		//	RodCount
@@ -816,10 +1024,11 @@ void LoadEEPROM() {
 
 			rodCount += (long)rodCountI;
 		}
-
+#ifdef DEBUG_SERIAL
 		Serial.print("Lifetime Rod Count: ");
 		Serial.print(rodCount);
 		Serial.print("\n");
+#endif
 	}
 
 	eeprom_busy_wait();
@@ -855,11 +1064,13 @@ void SaveSystemSettings() {
 		//	Zero the reserved range!
 		curAdd += sizeof(stopperSafePosition);
 
+#ifdef DEBUG_SERIAL
 		Serial.print("Zeroing ");
 		Serial.print(eepromReservedSize);
 		Serial.print(" bytes of data at address: ");
 		Serial.print(curAdd);
 		Serial.print("\n");
+#endif
 
 		for (int i=0; i<eepromReservedSize; i++) {
 			if (eeprom_read_byte((const byte*)curAdd + i) != 0) {
@@ -869,7 +1080,9 @@ void SaveSystemSettings() {
 	}
 
 	eeprom_busy_wait();
+#ifdef DEBUG_SERIAL
 	Serial.print("Save complete!\n");
+#endif
 }
 
 int GetJobConfigEEPROMAddress() {
@@ -886,7 +1099,7 @@ void SaveJobConfig() {
 
 		jobConfigRingPosition = (jobConfigRingPosition + 1) % JOB_CONFIG_RING_COUNT;
 		int curAdd = GetJobConfigEEPROMAddress() + jobConfigRingPosition*sizeof(currentJobConfig);
-
+#ifdef DEBUG_SERIAL
 		Serial.print("Write JobConfig at address: ");
 		Serial.print(curAdd);
 		Serial.print("\nJobID:");
@@ -896,7 +1109,7 @@ void SaveJobConfig() {
 		Serial.print("\nLen: ");
 		Serial.print(currentJobConfig.extrudeLength);
 		Serial.print("\n");
-
+#endif
 		eeprom_write_block((void*)&currentJobConfig, (void*)curAdd, sizeof(currentJobConfig));
 
 		eeprom_busy_wait();
