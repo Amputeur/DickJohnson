@@ -162,6 +162,7 @@ struct JobConfig {
 };
 
 JobConfig currentJobConfig;
+JobConfig loadedJobConfig;
 
 int prevRodSize;
 bool canReadRodSize = false;
@@ -201,8 +202,6 @@ byte saveDataVersion = 0;
 int jobConfigRingPosition = 0;
 unsigned long rodCount = 0;
 int rodCountRingPosition = 0;
-bool configSaved = true;
-
 
 enum AutoState {
 	AutoStateFirstRunGoHome,
@@ -256,6 +255,7 @@ void setup() {
 	SetupPin(OUT_VALVE_BACKWARD, false);
 
 	SetupPin(IN_UNIT_SELECTOR, true, true);
+	SetupPin(IN_THREAD_TYPE_SELECTOR, true, true);
 	SetupPin(IN_SET_EXTRUDE_LENGTH, true, true);
 	SetupPin(IN_SET_ROD_SIZE, true, true);
 	SetupPin(IN_PUMP, true, true);
@@ -361,6 +361,7 @@ void loop() {
 
 			if (currentRodSizeIndex >= 0 && currentRodSizeIndex < SIZE_COUNT) {
 				float len = 1.0f;
+				threadType = PURead(IN_THREAD_TYPE_SELECTOR);
 				if (threadType == THREAD_NC) {
 					len = extrusionTable[currentRodSizeIndex].ncExtrudeNeeded;
 				} else {
@@ -373,6 +374,21 @@ void loop() {
 				autoModeRaiseStopperPos = autoModeStartPos - STOPPER_PADDING;
 				autoModeRaiseStopperPos = min(stopperSafePosition, autoModeRaiseStopperPos);
 				autoModeExtrudePos = maxPistonPosition;
+
+#ifdef DEBUG_SERIAL
+				Serial.print("autoModeStartPos: ");
+				Serial.print(((float)autoModeStartPos / (float)POSITION_MULTIPLICATOR));
+				Serial.print("\n");
+				Serial.print("autoModeBackPos: ");
+				Serial.print(((float)autoModeBackPos / (float)POSITION_MULTIPLICATOR));
+				Serial.print("\n");
+				Serial.print("autoModeRaiseStopperPos: ");
+				Serial.print(((float)autoModeRaiseStopperPos / (float)POSITION_MULTIPLICATOR));
+				Serial.print("\n");
+				Serial.print("autoModeExtrudePos: ");
+				Serial.print(((float)autoModeExtrudePos / (float)POSITION_MULTIPLICATOR));
+				Serial.print("\n");
+#endif
 			}
 		}
 		LoopAuto();
@@ -565,16 +581,12 @@ void ReadConfig() {
 		updateDisplay = true;
 		prevRodSize = currentJobConfig.rodSize;
 		UpdateDisplayRodSize();
-
-		configSaved = false;
 	}
 
 	if (prevExtrudeLength != currentJobConfig.extrudeLength) {
 		updateDisplay = true;
 		prevExtrudeLength = currentJobConfig.extrudeLength;
 		UpdateDisplayExtureLength();
-
-		configSaved = false;
 	}
 
 	if (setUnit != unitType) {
@@ -767,7 +779,7 @@ void LoopAuto() {
 		break;
 	case AutoStateMoveBackwardForStopper:
 		if (GotoDestination(autoModeRaiseStopperPos, PISTON_POSITION_DESTINATION_THRESHOLD, HIGH)) {
-			autoState = AutoStateLowerStopper;
+			autoState = AutoStateStopOil;
 		}
 		break;
 	case AutoStateStopOil:
@@ -854,7 +866,7 @@ bool MoveStopper(bool destination) {
 			digitalWrite(OUT_LOWER_STOP, true);
 		}
 	}
-	
+
 	return false;
 }
 
@@ -982,25 +994,27 @@ void LoadEEPROM() {
 #endif
 		//	JobConfig
 		int highestJobRing = 0;
-		JobConfig highestJobCfg;
-		highestJobCfg.jobID = 0;
-		highestJobCfg.rodSize = 0.75f * ROD_SIZE_MULTIPLICATOR;
-		highestJobCfg.extrudeLength = 4.0f * EXTRUDE_LENGTH_MULTIPLICATOR;
+		loadedJobConfig.jobID = 0;
+		loadedJobConfig.rodSize = 0.75f * ROD_SIZE_MULTIPLICATOR;
+		loadedJobConfig.extrudeLength = 4.0f * EXTRUDE_LENGTH_MULTIPLICATOR;
 		JobConfig readJobCfg;
 
 		for (int i=0; i<JOB_CONFIG_RING_COUNT; i++) {
 			int readAdd = curAdd + sizeof(currentJobConfig)*i;
 			eeprom_read_block(&readJobCfg, (const void*)readAdd, sizeof(currentJobConfig));
 
-			if (readJobCfg.jobID > highestJobCfg.jobID) {
-				highestJobCfg = readJobCfg;
+			if (readJobCfg.jobID > loadedJobConfig.jobID) {
+				loadedJobConfig = readJobCfg;
 				
 				highestJobRing = i;
 			}
 		}
 		jobConfigRingPosition = highestJobRing;
 
-		currentJobConfig = highestJobCfg;
+		currentJobConfig = loadedJobConfig;
+		prevRodSize = currentJobConfig.rodSize;
+		prevExtrudeLength = currentJobConfig.extrudeLength;
+
 #ifdef DEBUG_SERIAL
 		Serial.print("--JobConfig--\nID:");
 		Serial.print(currentJobConfig.jobID);
@@ -1012,8 +1026,6 @@ void LoadEEPROM() {
 		Serial.print(jobConfigRingPosition);
 		Serial.print("\n");
 #endif
-		configSaved = true;
-
 		//	RodCount
 		curAdd += sizeof(currentJobConfig) * JOB_CONFIG_RING_COUNT;
 
@@ -1094,7 +1106,10 @@ int GetRodCountEEPROM_Address() {
 }
 
 void SaveJobConfig() {
-	if (!configSaved && saveDataVersion == SAVE_DATA_VERSION) {
+	if (loadedJobConfig.rodSize != currentJobConfig.rodSize &&
+		loadedJobConfig.extrudeLength != currentJobConfig.extrudeLength &&
+		saveDataVersion == SAVE_DATA_VERSION) {
+
 		currentJobConfig.jobID++;
 
 		jobConfigRingPosition = (jobConfigRingPosition + 1) % JOB_CONFIG_RING_COUNT;
@@ -1113,8 +1128,6 @@ void SaveJobConfig() {
 		eeprom_write_block((void*)&currentJobConfig, (void*)curAdd, sizeof(currentJobConfig));
 
 		eeprom_busy_wait();
-
-		configSaved = true;
 	}
 }
 
