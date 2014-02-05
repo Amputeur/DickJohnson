@@ -7,6 +7,7 @@
 #define EEPROM_VERSION_ADDRESS 0
 #define JOB_CONFIG_RING_COUNT 8
 #define ROD_COUNT_RING_COUNT  32
+#define STATS_AVERAGE_TIME_SAMPLING_COUNT 10
 
 #define MIN_ROD_SIZE 0.25f * ROD_SIZE_MULTIPLICATOR
 #define MAX_ROD_SIZE 1.25f * ROD_SIZE_MULTIPLICATOR
@@ -104,6 +105,7 @@ enum Message {
 	MessageNone,
 	MessageErrorPumpNotStarted,
 	MessageErrorSystemNotInitialized,
+	MessageErrorExtrudePressure,
 	MessageConfigModePumpNotStarted,
 	MessageConfigModeNotInitialized,
 	MessageConfigModeMissingConfig,
@@ -111,14 +113,17 @@ enum Message {
 	MessageConfigModeCalibrateStroke,
 	MessageConfigModeCalibrateStropper,
 	MessageConfigModeInitialized,
+	MessageAutoModeRunning,
+	MessageAutoModeStats,
 
-	MessageCount
+	MessageCount,
 };
 
 String messages[MessageCount][MessageCount] = {
 	{" A BEbit Studio", "    MACHINE."},	//	MessageNone
 	{"Start the pump.", ""},	//	MessageErrorPumpNotStarted
 	{"Init the system", "first."},	//	MessageErrorSystemNotInitialized
+	{"Max pressure", "reached."},	//	MessageErrorExtrudePressure
 	{"D:      L:", "Start the pump."},	//	MessageConfigModePumpNotStarted
 	{"D:      L:", "Press HOME"},	//	MessageConfigModeNotInitialized
 	{"D:      L:", "Missing Config"},	//	MessageConfigModeMissingConfig
@@ -126,6 +131,8 @@ String messages[MessageCount][MessageCount] = {
 	{"D:      L:", "Calc Stroke"},	//	MessageConfigModeCalibrateStroke
 	{"D:      L:", "HOME when clear"},	//	MessageConfigModeCalibrateStropper
 	{"D:      L:", ""},	//	MessageConfigModeInitialized
+	{"D:      L:", "C:"},	//	MessageAutoModeRunning
+	{"TC:       A:", "C:        W:"},	//	MessageAutoModeStats
 };
 
 Message currentMessage = MessageNone;
@@ -222,7 +229,8 @@ enum AutoState {
 	AutoStateMoveBackwardPostExtrude,
 	AutoStateLowerStopper,
 	AutoStateOpenVice,
-	AutoStateMoveForwardToStartPos
+	AutoStateMoveForwardToStartPos,
+	AutoStateErrorExtrudePressure
 };
 AutoState autoState = AutoStateFirstRunGoHome;
 
@@ -231,14 +239,20 @@ int autoModeBackPos;
 int autoModeRaiseStopperPos;
 int autoModeExtrudePos;
 int autoModeVicePressure;
+int autoModeExtrudePressure;
 
 long autoModeViceTimer = 0;
+bool displayStats = false;
+unsigned int thisJobRodCount = 0;
+bool autoModeHomeWasDown = false;
+
+unsigned long lastExtrudeTimes[STATS_AVERAGE_TIME_SAMPLING_COUNT] = {0ul};
+unsigned long lastWaitTimes[STATS_AVERAGE_TIME_SAMPLING_COUNT] = {0ul};
+unsigned int currentSamplingIndex = 0;
+unsigned long refWaitTime = 0;
+unsigned long refExtrudeTime = 0;
 
 void setup() {
-	//	TODO
-	//	Get pistonStrokeLength from EEPROM
-	//	Get stopperSafePosition from EEPROM
-
 	lcd.begin(16, 2);
 	lcd.clear();
 	UpdateDisplayComplete();
@@ -293,6 +307,9 @@ void setup() {
 #ifdef DEBUG_SERIAL
 	Serial.begin(9600);
 #endif
+
+	//	Read from an unused Analog pin to use electrical noise as seed.
+	randomSeed(analogRead(15));
 
 	LoadEEPROM();
 }
@@ -382,6 +399,16 @@ void loop() {
 				autoModeRaiseStopperPos = min(minPistonPosition + stopperSafePosition, autoModeRaiseStopperPos);
 				autoModeExtrudePos = maxPistonPosition;
 				autoModeVicePressure = extrusionTable[currentRodSizeIndex].viceMaxPressure;
+				autoModeExtrudePressure = extrusionTable[currentRodSizeIndex].extrudeMaxPressure;
+
+				displayStats = false;
+				thisJobRodCount = 0;
+				autoModeHomeWasDown = false;
+
+				currentSamplingIndex = 0;
+				for (int i=0; i<STATS_AVERAGE_TIME_SAMPLING_COUNT; i++) {
+					lastWaitTimes[i] = lastExtrudeTimes[i] = 0;
+				}
 
 #ifdef DEBUG_SERIAL
 				Serial.print("autoModeStartPos: ");
@@ -399,6 +426,10 @@ void loop() {
 				Serial.print("autoModeVicePressure: ");
 				Serial.print(autoModeVicePressure);
 				Serial.print("\n");
+				Serial.print("autoModeExtrudePressure: ");
+				Serial.print(autoModeExtrudePressure);
+				Serial.print("\n");
+				
 #endif
 			} else {
 				//	TODO Error.
@@ -731,8 +762,6 @@ void LeaveModeManual() {
 
 }
 
-AutoState oldState;
-
 void LoopAuto() {
 	if (!initialized || pistonStrokeLength == 0 || stopperSafePosition == 0) {
 		currentMessage = MessageErrorSystemNotInitialized;
@@ -751,11 +780,28 @@ void LoopAuto() {
 		return;
 	}
 
-	if (oldState != autoState) {
-		oldState = autoState;
-		Serial.print("NewState: ");
-		Serial.print(oldState);
-		Serial.print("\n");
+	bool home = PURead(IN_HOME);
+
+	if (!autoModeHomeWasDown && home) {
+		displayStats = !displayStats;
+	}
+	autoModeHomeWasDown = home;
+
+	if (displayStats) {
+		if (currentMessage != MessageAutoModeStats) {
+			currentMessage = MessageAutoModeStats;
+			UpdateDisplayComplete();
+			UpdateDisplayStats();
+			UpdateDisplayCount();
+		}
+	} else {
+		if (currentMessage != MessageAutoModeRunning) {
+			currentMessage = MessageAutoModeRunning;
+			UpdateDisplayComplete();
+			UpdateDisplayRodSize();
+			UpdateDisplayExtureLength();
+			UpdateDisplayCount();
+		}
 	}
 	switch (autoState) {
 	case AutoStateFirstRunGoHome:
@@ -778,6 +824,7 @@ void LoopAuto() {
 	case AutoStateFirstRunGotoStartPos:
 		if (GotoDestination(autoModeStartPos, PISTON_POSITION_DESTINATION_THRESHOLD, LOW)) {
 			autoState = AutoStateStartOil;
+			refExtrudeTime = refWaitTime = millis();
 		}
 		break;
 	case AutoStateStartOil:
@@ -787,6 +834,10 @@ void LoopAuto() {
 	case AutoStateWaitPedal:
 		if (PURead(IN_PEDAL)) {
 			autoState = AutoStateClosingVice;
+			lastWaitTimes[currentSamplingIndex] = millis() - refWaitTime;
+			if (displayStats) {
+				UpdateDisplayStats();
+			}
 		}
 		break;
 	case AutoStateClosingVice:
@@ -811,8 +862,14 @@ void LoopAuto() {
 	case AutoStateMoveForwardExtrude:
 		if (GotoDestination(autoModeExtrudePos, PISTON_POSITION_DESTINATION_THRESHOLD, LOW)) {
 			autoState = AutoStateMoveBackwardPostExtrude;
+		} else {
+			if (currentPressure > autoModeExtrudePressure) {
+				digitalWrite(OUT_VALVE_BACKWARD, false);
+				digitalWrite(OUT_VALVE_FORWARD, false);
+				autoState = AutoStateErrorExtrudePressure;
+				currentMessage = MessageErrorExtrudePressure;
+			}
 		}
-		//	TODO	Check Pressure for this size.
 		break;
 	case AutoStateMoveBackwardPostExtrude:
 		if (GotoDestination(autoModeBackPos, PISTON_POSITION_DESTINATION_THRESHOLD, HIGH)) {
@@ -834,6 +891,13 @@ void LoopAuto() {
 	case AutoStateMoveForwardToStartPos:
 		if (GotoDestination(autoModeStartPos, PISTON_POSITION_DESTINATION_THRESHOLD, LOW)) {
 			autoState = AutoStateStartOil;
+
+			unsigned long curMillis = millis();
+			lastExtrudeTimes[currentSamplingIndex] = curMillis - refExtrudeTime;
+			refExtrudeTime = refWaitTime = curMillis;
+
+			currentSamplingIndex = (currentSamplingIndex + 1) % STATS_AVERAGE_TIME_SAMPLING_COUNT;
+			IncrementCount();
 		}
 		break;
 	}
@@ -1010,6 +1074,62 @@ void UpdateDisplayExtureLength() {
 	}
 }
 
+void UpdateDisplayCount() {
+	lcd.setCursor(3, 1);
+	lcd.print(thisJobRodCount);
+}
+
+void UpdateDisplayStats() {
+	//	"TC:       A:",
+	//	"C:        W:"
+	lcd.setCursor(4, 0);
+	lcd.print(rodCount);
+
+	//	Average time per extrude.
+	unsigned long total = 0;
+	unsigned int count = 0;
+	for (int i=0; i<STATS_AVERAGE_TIME_SAMPLING_COUNT; i++) {
+		if (lastExtrudeTimes[i] > 0ul) {
+			total += lastExtrudeTimes[i];
+			count++;
+		}
+	}
+	lcd.setCursor(13, 0);
+	if (count > 0) {
+		total = (total / (unsigned long)count) / 1000ul;
+		lcd.print(total);
+		if (total < 10) {
+			lcd.print("  ");
+		} else if (total < 100) {
+			lcd.print(" ");
+		}
+	} else {
+		lcd.print("0_0");
+	}
+
+	//	Average time wasted.
+	total = 0;
+	count = 0;
+	for (int i=0; i<STATS_AVERAGE_TIME_SAMPLING_COUNT; i++) {
+		if (lastWaitTimes[i] > 0ul) {
+			total += lastWaitTimes[i];
+			count++;
+		}
+	}
+	lcd.setCursor(13, 1);
+	if (count > 0) {
+		total = (total / (unsigned long)count) / 1000ul;
+		lcd.print(total);
+		if (total < 10) {
+			lcd.print("  ");
+		} else if (total < 100) {
+			lcd.print(" ");
+		}
+	} else {
+		lcd.print("0_0");
+	}
+}
+
 void LoadEEPROM() {
 	eeprom_busy_wait();
 
@@ -1075,13 +1195,26 @@ void LoadEEPROM() {
 
 		rodCount = 0ul;
 		unsigned int rodCountI = 0u;
+#ifdef DEBUG_SERIAL
+		Serial.print("Rod Count Rings: ");
+#endif
 		for (int i=0; i<ROD_COUNT_RING_COUNT; i++) {
 			rodCountI = eeprom_read_word((unsigned int*)(curAdd + sizeof(rodCountI)*i));
 
 			rodCount += (long)rodCountI;
-		}
+
 #ifdef DEBUG_SERIAL
-		Serial.print("Lifetime Rod Count: ");
+			Serial.print(i);
+			Serial.print(": ");
+			Serial.print(rodCountI);
+			Serial.print("\t");
+#endif
+		}
+
+		rodCountRingPosition = random(0, ROD_COUNT_RING_COUNT);
+
+#ifdef DEBUG_SERIAL
+		Serial.print("\nLifetime Rod Count: ");
 		Serial.print(rodCount);
 		Serial.print("\n");
 #endif
@@ -1185,7 +1318,26 @@ void SaveJobConfig() {
 }
 
 void IncrementCount() {
+	thisJobRodCount++;
+	rodCount++;
+
 	if (saveDataVersion == SAVE_DATA_VERSION) {
+		int curAdd = GetRodCountEEPROM_Address();
+
+		rodCountRingPosition = (rodCountRingPosition + 1) % ROD_COUNT_RING_COUNT;
+
+		curAdd += rodCountRingPosition * sizeof(unsigned int);
+
+		unsigned int c = eeprom_read_word((unsigned int*)curAdd);
+		c++;
+		eeprom_write_word((unsigned int*)curAdd, c);
+	}
+
+	if (currentMessage == MessageAutoModeRunning || currentMessage == MessageAutoModeStats) {
+		UpdateDisplayCount();
+		if (displayStats) {
+			UpdateDisplayStats();
+		}
 	}
 }
 
