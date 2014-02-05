@@ -3,7 +3,7 @@
 
 #define DEBUG_SERIAL
 
-#define SAVE_DATA_VERSION 1
+#define SAVE_DATA_VERSION 2
 #define EEPROM_VERSION_ADDRESS 0
 #define JOB_CONFIG_RING_COUNT 8
 #define ROD_COUNT_RING_COUNT  32
@@ -19,13 +19,16 @@
 #define STOPPER_THICKNESS 1.0f * POSITION_MULTIPLICATOR;
 #define STOPPER_PADDING 0.25f * POSITION_MULTIPLICATOR;
 
-#define MAX_PRESSURE 255
+#define MAX_PRESSURE 512
 #define RECALIBRATE_HOLD_TIME 2500
 
 #define POSITION_MULTIPLICATOR 1250
-#define PISTON_POSITION_ZERO_OFFSET 100
+#define PISTON_POSITION_ZERO_OFFSET 10000
 #define PISTON_POSITION_PADDING 0.125f * POSITION_MULTIPLICATOR
 #define PISTON_POSITION_DESTINATION_THRESHOLD 0.01f * POSITION_MULTIPLICATOR
+
+#define VICE_RAISE_TIMER_MIN 100
+
 #define THREAD_NC true
 #define THREAD_NF false
 #define UNIT_MM true
@@ -185,6 +188,7 @@ unsigned int pistonStrokeLength = 0;
 unsigned int stopperSafePosition = 0;
 unsigned int minPistonPosition = 0;
 unsigned int maxPistonPosition = 0;
+unsigned int viceRaiseTimer = 250;
 
 int currentPressure = 0;
 
@@ -226,6 +230,9 @@ int autoModeStartPos;
 int autoModeBackPos;
 int autoModeRaiseStopperPos;
 int autoModeExtrudePos;
+int autoModeVicePressure;
+
+long autoModeViceTimer = 0;
 
 void setup() {
 	//	TODO
@@ -372,8 +379,9 @@ void loop() {
 				autoModeStartPos = maxPistonPosition - (int)(realLen * len * (float)POSITION_MULTIPLICATOR) - STOPPER_THICKNESS;
 				autoModeBackPos = maxPistonPosition - (int)(realLen * (float)POSITION_MULTIPLICATOR) - STOPPER_THICKNESS - STOPPER_PADDING;
 				autoModeRaiseStopperPos = autoModeStartPos - STOPPER_PADDING;
-				autoModeRaiseStopperPos = min(stopperSafePosition, autoModeRaiseStopperPos);
+				autoModeRaiseStopperPos = min(minPistonPosition + stopperSafePosition, autoModeRaiseStopperPos);
 				autoModeExtrudePos = maxPistonPosition;
+				autoModeVicePressure = extrusionTable[currentRodSizeIndex].viceMaxPressure;
 
 #ifdef DEBUG_SERIAL
 				Serial.print("autoModeStartPos: ");
@@ -388,7 +396,12 @@ void loop() {
 				Serial.print("autoModeExtrudePos: ");
 				Serial.print(((float)autoModeExtrudePos / (float)POSITION_MULTIPLICATOR));
 				Serial.print("\n");
+				Serial.print("autoModeVicePressure: ");
+				Serial.print(autoModeVicePressure);
+				Serial.print("\n");
 #endif
+			} else {
+				//	TODO Error.
 			}
 		}
 		LoopAuto();
@@ -515,6 +528,8 @@ void Zeroing() {
 void ZeroingPressureCallback() {
 	pistonPosition = PISTON_POSITION_ZERO_OFFSET;
 	minPistonPosition = pistonPosition + PISTON_POSITION_PADDING;
+	maxPistonPosition = minPistonPosition + pistonStrokeLength - PISTON_POSITION_PADDING;
+
 	attachInterrupt(PISTON_POSITION_ENCODER_A_INTERRUPT, PistonPositionInterrupt, CHANGE);
 
 	initialized = true;
@@ -535,9 +550,9 @@ void CalibrateStroke() {
 
 void CalibrateStrokePressureCallback() {
 	if (PURead(IN_STOP_RAISED)) {
-		pistonStrokeLength = pistonPosition;
+		pistonStrokeLength = pistonPosition - minPistonPosition;
 
-		maxPistonPosition = pistonStrokeLength - PISTON_POSITION_PADDING;
+		maxPistonPosition = minPistonPosition + pistonStrokeLength - PISTON_POSITION_PADDING;
 
 		initState = InitStateWaiting;
 
@@ -557,7 +572,7 @@ void CalibrateStopper() {
 			homePressTime = millis();
 		}
 	} else if (homePressTime != -1) {
-		stopperSafePosition = pistonPosition;
+		stopperSafePosition = pistonPosition - minPistonPosition;
 		
 		initState = InitStateWaiting;
 
@@ -653,7 +668,7 @@ void UpdatePositionManual() {
 
 void UpdateStopperManual() {
 	//	Check in safe zone to raise.
-	if (pistonPosition <= stopperSafePosition) {
+	if (pistonPosition <= minPistonPosition + stopperSafePosition) {
 		if (PURead(IN_MANUAL_LOWER_STOPPER) && !PURead(IN_STOP_LOWERED)) {
 			stopperToLow = true;
 			digitalWrite(OUT_LOWER_STOP, true);
@@ -751,6 +766,8 @@ void LoopAuto() {
 	case AutoStateFirstRunLowerStopper:
 		if (MoveStopper(LOW)) {
 			autoState = AutoStateFirstRunOpenVice;
+			//	Set the timer for the Vice to open.
+			autoModeViceTimer = millis() + (unsigned long)viceRaiseTimer;
 		}
 		break;
 	case AutoStateFirstRunOpenVice:
@@ -805,6 +822,8 @@ void LoopAuto() {
 	case AutoStateLowerStopper:
 		if (MoveStopper(LOW)) {
 			autoState = AutoStateOpenVice;
+			//	Set the timer for the Vice to open.
+			autoModeViceTimer = millis() + (unsigned long)viceRaiseTimer;
 		}
 		break;
 	case AutoStateOpenVice:
@@ -871,8 +890,29 @@ bool MoveStopper(bool destination) {
 }
 
 bool MoveVice(bool destination) {
-	//	TODO using a Timer
-	return true;
+	if (destination == HIGH) {
+		unsigned long curTime = millis();
+		if (autoModeViceTimer <= curTime) {
+			autoModeViceTimer = 0;
+			digitalWrite(OUT_VICE_CLOSE, false);
+			digitalWrite(OUT_VICE_OPEN, false);
+			return true;
+		} else {
+			digitalWrite(OUT_VICE_CLOSE, false);
+			digitalWrite(OUT_VICE_OPEN, true);
+		}
+	} else {
+		if (currentPressure >= autoModeVicePressure) {
+			digitalWrite(OUT_VICE_CLOSE, false);
+			digitalWrite(OUT_VICE_OPEN, false);
+			return true;
+		} else {
+			digitalWrite(OUT_VICE_CLOSE, true);
+			digitalWrite(OUT_VICE_OPEN, false);
+		}
+	}
+
+	return false;
 }
 
 void LeaveModeAuto() {
@@ -973,20 +1013,24 @@ void UpdateDisplayExtureLength() {
 void LoadEEPROM() {
 	eeprom_busy_wait();
 
-	saveDataVersion = eeprom_read_byte((const byte*)EEPROM_VERSION_ADDRESS);
+	saveDataVersion = eeprom_read_byte((byte*)EEPROM_VERSION_ADDRESS);
 
 	if (saveDataVersion == SAVE_DATA_VERSION) {
 
 		//	System Settings.
 		int curAdd = EEPROM_VERSION_ADDRESS + sizeof(saveDataVersion);
 
-		pistonStrokeLength = eeprom_read_word((const unsigned int*)curAdd);
+		pistonStrokeLength = eeprom_read_word((unsigned int*)curAdd);
 		curAdd += sizeof(pistonStrokeLength);
-		stopperSafePosition = eeprom_read_word((const unsigned int*)curAdd);
+		stopperSafePosition = eeprom_read_word((unsigned int*)curAdd);
 
-		maxPistonPosition = pistonStrokeLength - PISTON_POSITION_PADDING;
-
+		maxPistonPosition = minPistonPosition + pistonStrokeLength - PISTON_POSITION_PADDING;
 		curAdd += sizeof(stopperSafePosition);
+
+		viceRaiseTimer = eeprom_read_word((unsigned int*)curAdd);
+		viceRaiseTimer = max(viceRaiseTimer, VICE_RAISE_TIMER_MIN);
+		curAdd += sizeof(viceRaiseTimer);
+
 #ifdef DEBUG_SERIAL
 		Serial.print("Reading JobConfig from address: ");
 		Serial.print(curAdd);
@@ -1001,7 +1045,7 @@ void LoadEEPROM() {
 
 		for (int i=0; i<JOB_CONFIG_RING_COUNT; i++) {
 			int readAdd = curAdd + sizeof(currentJobConfig)*i;
-			eeprom_read_block(&readJobCfg, (const void*)readAdd, sizeof(currentJobConfig));
+			eeprom_read_block(&readJobCfg, (void*)readAdd, sizeof(currentJobConfig));
 
 			if (readJobCfg.jobID > loadedJobConfig.jobID) {
 				loadedJobConfig = readJobCfg;
@@ -1032,7 +1076,7 @@ void LoadEEPROM() {
 		rodCount = 0ul;
 		unsigned int rodCountI = 0u;
 		for (int i=0; i<ROD_COUNT_RING_COUNT; i++) {
-			rodCountI = eeprom_read_word((const unsigned int*)(curAdd + sizeof(rodCountI)*i));
+			rodCountI = eeprom_read_word((unsigned int*)(curAdd + sizeof(rodCountI)*i));
 
 			rodCount += (long)rodCountI;
 		}
@@ -1066,6 +1110,11 @@ void SaveSystemSettings() {
 		eeprom_write_word((unsigned int*)curAdd, stopperSafePosition);
 	}
 
+	curAdd += sizeof(viceRaiseTimer);
+	if (eeprom_read_word((unsigned int*)curAdd) != viceRaiseTimer) {
+		eeprom_write_word((unsigned int*)curAdd, viceRaiseTimer);
+	}
+
 	if (initEEPROM) {
 		//	JobConfig area.
 		int eepromReservedSize = sizeof(currentJobConfig) * JOB_CONFIG_RING_COUNT;
@@ -1085,7 +1134,7 @@ void SaveSystemSettings() {
 #endif
 
 		for (int i=0; i<eepromReservedSize; i++) {
-			if (eeprom_read_byte((const byte*)curAdd + i) != 0) {
+			if (eeprom_read_byte((byte*)curAdd + i) != 0) {
 				eeprom_write_byte((byte *)curAdd + i, 0);
 			}
 		}
@@ -1098,7 +1147,11 @@ void SaveSystemSettings() {
 }
 
 int GetJobConfigEEPROMAddress() {
-	return EEPROM_VERSION_ADDRESS + sizeof(saveDataVersion) + sizeof(pistonStrokeLength) + sizeof(stopperSafePosition);
+	return EEPROM_VERSION_ADDRESS +
+	sizeof(saveDataVersion) +
+	sizeof(pistonStrokeLength) +
+	sizeof(stopperSafePosition) +
+	sizeof(viceRaiseTimer);
 }
 
 int GetRodCountEEPROM_Address() {
