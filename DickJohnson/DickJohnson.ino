@@ -29,6 +29,7 @@
 #define PISTON_POSITION_DESTINATION_THRESHOLD 0.01f * POSITION_MULTIPLICATOR
 
 #define VICE_RAISE_TIMER_MIN 100
+#define VICE_RAISE_TIMER_MAX 5000
 
 #define THREAD_NC true
 #define THREAD_NF false
@@ -97,7 +98,8 @@ enum InitState {
 	InitStateWaiting,
 	InitStateZeroing,
 	InitStateCalibrateStroke,
-	InitStateCalibrateStopper
+	InitStateCalibrateStopper,
+	InitStateCalibrateViceRaiseTime,
 };
 InitState initState = InitStateWaiting;
 
@@ -106,12 +108,14 @@ enum Message {
 	MessageErrorPumpNotStarted,
 	MessageErrorSystemNotInitialized,
 	MessageErrorExtrudePressure,
+	MessageErrorAutoModeGeneric,
 	MessageConfigModePumpNotStarted,
 	MessageConfigModeNotInitialized,
 	MessageConfigModeMissingConfig,
 	MessageConfigModeZeroInProgress,
 	MessageConfigModeCalibrateStroke,
 	MessageConfigModeCalibrateStropper,
+	MessageConfigModeCalibrateViceRaiseTimer,
 	MessageConfigModeInitialized,
 	MessageAutoModeRunning,
 	MessageAutoModeStats,
@@ -124,12 +128,14 @@ String messages[MessageCount][MessageCount] = {
 	{"Start the pump.", ""},	//	MessageErrorPumpNotStarted
 	{"Init the system", "first."},	//	MessageErrorSystemNotInitialized
 	{"Max pressure", "reached."},	//	MessageErrorExtrudePressure
+	{"Error.", "Reset Auto Mode"}, 	//	MessageErrorAutoModeGeneric
 	{"D:      L:", "Start the pump."},	//	MessageConfigModePumpNotStarted
 	{"D:      L:", "Press HOME"},	//	MessageConfigModeNotInitialized
 	{"D:      L:", "Missing Config"},	//	MessageConfigModeMissingConfig
 	{"D:      L:", "Zero in progress"},	//	MessageConfigModeZeroInProgress
 	{"D:      L:", "Calc Stroke"},	//	MessageConfigModeCalibrateStroke
 	{"D:      L:", "HOME when clear"},	//	MessageConfigModeCalibrateStropper
+	{"D:      L:", "Raise Time: "},	//	MessageConfigModeCalibrateViceRaiseTimer
 	{"D:      L:", ""},	//	MessageConfigModeInitialized
 	{"D:      L:", "C:"},	//	MessageAutoModeRunning
 	{"TC:       A:", "C:        W:"},	//	MessageAutoModeStats
@@ -230,7 +236,8 @@ enum AutoState {
 	AutoStateLowerStopper,
 	AutoStateOpenVice,
 	AutoStateMoveForwardToStartPos,
-	AutoStateErrorExtrudePressure
+	AutoStateErrorExtrudePressure,
+	AutoStateErrorPump,
 };
 AutoState autoState = AutoStateFirstRunGoHome;
 
@@ -485,6 +492,9 @@ void LoopInit() {
 		case InitStateCalibrateStopper:
 			currentMessage = MessageConfigModeCalibrateStropper;
 			break;
+		case InitStateCalibrateViceRaiseTime:
+			currentMessage = MessageConfigModeCalibrateViceRaiseTimer;
+			break;
 		}
 	} else if (initialized) {
 		if (pistonStrokeLength == 0 || stopperSafePosition == 0) {
@@ -508,17 +518,28 @@ void LoopInit() {
 	case InitStateCalibrateStopper:
 		CalibrateStopper();
 		break;
+	case InitStateCalibrateViceRaiseTime:
+		CalibrateViceRaiseTime();
+		return;
 	default:
-		InitWaitHome();
+		InitWaitInput();
 		break;
 	}
 
 	ReadConfig();
 }
 
-void InitWaitHome() {
-	//	Wait HOME button.
-	if (PURead(IN_HOME)) {
+void InitWaitInput() {
+	if (PURead(IN_MANUAL_OPEN_VICE) && PURead(IN_MANUAL_CLOSE_VICE)) {
+		if (initState != InitStateCalibrateViceRaiseTime) {
+			initState = InitStateCalibrateViceRaiseTime;
+			detachInterrupt(CONFIG_ENCODER_A_INTERRUPT);
+			canReadRodSize = false;
+			canReadExtrudeLength = false;
+
+			attachInterrupt(CONFIG_ENCODER_A_INTERRUPT, UpdateViceRaiseTimer, CHANGE);
+		}
+	} else if (PURead(IN_HOME)) {
 		if (homePressTime == -1) {
 			homePressTime = millis();
 		} else if (initModeHomeCount > 0 && (millis() - homePressTime) > RECALIBRATE_HOLD_TIME) {
@@ -612,6 +633,17 @@ void CalibrateStopper() {
 		if (pistonStrokeLength != 0 && stopperSafePosition != 0) {
 			SaveSystemSettings();
 		}
+	}
+}
+
+void CalibrateViceRaiseTime() {
+	if (PURead(IN_MANUAL_OPEN_VICE) && PURead(IN_MANUAL_CLOSE_VICE)) {
+		UpdateDisplayViceRaiseTime();
+	} else {
+		initState = InitStateWaiting;
+		detachInterrupt(CONFIG_ENCODER_A_INTERRUPT);
+
+		SaveSystemSettings();
 	}
 }
 
@@ -772,6 +804,7 @@ void LoopAuto() {
 	if (!pumpStarted) {
 		currentMessage = MessageErrorPumpNotStarted;
 		UpdateDisplayComplete();
+		autoState = AutoStateErrorPump;
 		return;
 	}
 
@@ -780,29 +813,6 @@ void LoopAuto() {
 		return;
 	}
 
-	bool home = PURead(IN_HOME);
-
-	if (!autoModeHomeWasDown && home) {
-		displayStats = !displayStats;
-	}
-	autoModeHomeWasDown = home;
-
-	if (displayStats) {
-		if (currentMessage != MessageAutoModeStats) {
-			currentMessage = MessageAutoModeStats;
-			UpdateDisplayComplete();
-			UpdateDisplayStats();
-			UpdateDisplayCount();
-		}
-	} else {
-		if (currentMessage != MessageAutoModeRunning) {
-			currentMessage = MessageAutoModeRunning;
-			UpdateDisplayComplete();
-			UpdateDisplayRodSize();
-			UpdateDisplayExtureLength();
-			UpdateDisplayCount();
-		}
-	}
 	switch (autoState) {
 	case AutoStateFirstRunGoHome:
 		if (GotoDestination(minPistonPosition, PISTON_POSITION_DESTINATION_THRESHOLD, HIGH)) {
@@ -868,6 +878,8 @@ void LoopAuto() {
 				digitalWrite(OUT_VALVE_FORWARD, false);
 				autoState = AutoStateErrorExtrudePressure;
 				currentMessage = MessageErrorExtrudePressure;
+				UpdateDisplayComplete();
+				return;
 			}
 		}
 		break;
@@ -900,9 +912,35 @@ void LoopAuto() {
 			IncrementCount();
 		}
 		break;
+	case AutoStateErrorPump:
+		currentMessage = MessageErrorAutoModeGeneric;
+		UpdateDisplayComplete();
+		return;
 	}
 
-	UpdateDisplayComplete();
+	bool home = PURead(IN_HOME);
+
+	if (!autoModeHomeWasDown && home) {
+		displayStats = !displayStats;
+	}
+	autoModeHomeWasDown = home;
+
+	if (displayStats) {
+		if (currentMessage != MessageAutoModeStats) {
+			currentMessage = MessageAutoModeStats;
+			UpdateDisplayComplete();
+			UpdateDisplayStats();
+			UpdateDisplayCount();
+		}
+	} else {
+		if (currentMessage != MessageAutoModeRunning) {
+			currentMessage = MessageAutoModeRunning;
+			UpdateDisplayComplete();
+			UpdateDisplayRodSize();
+			UpdateDisplayExtureLength();
+			UpdateDisplayCount();
+		}
+	}
 }
 
 bool GotoDestination(int destination, int threshold, bool continueIf) {
@@ -1005,6 +1043,14 @@ void UpdateExtrudeLengthInterrupt() {
 		currentJobConfig.extrudeLength = min(currentJobConfig.extrudeLength + 1, MAX_EXTRUDE_LENGTH);
 	} else {
 		currentJobConfig.extrudeLength = max(currentJobConfig.extrudeLength - 1, MIN_EXTRUDE_LENGTH);
+	}
+}
+
+void UpdateViceRaiseTimer() {
+	if (digitalRead(CONFIG_ENCODER_A) == digitalRead(CONFIG_ENCODER_B)) {
+		viceRaiseTimer = min(viceRaiseTimer + 1, VICE_RAISE_TIMER_MAX);
+	} else {
+		viceRaiseTimer = max(viceRaiseTimer - 1, VICE_RAISE_TIMER_MIN);
 	}
 }
 
@@ -1128,6 +1174,13 @@ void UpdateDisplayStats() {
 	} else {
 		lcd.print("0_0");
 	}
+}
+
+void UpdateDisplayViceRaiseTime() {
+	//	"Raise Time: "
+	lcd.setCursor(12, 1);
+	lcd.print(viceRaiseTimer);
+	lcd.print("   ");
 }
 
 void LoadEEPROM() {
