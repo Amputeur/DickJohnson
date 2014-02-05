@@ -72,8 +72,8 @@
 #define IN_STOP_RAISED 45
 #define IN_STOP_LOWERED 43
 
-#define IN_MANUAL_RAISE_STOPPER 36
-#define IN_MANUAL_LOWER_STOPPER 37
+#define OUT_STOPPER_RAISED 36
+#define IN_MANUAL_TOGGLE_STOPPER 37
 #define IN_MANUAL_OPEN_VICE 38
 #define IN_MANUAL_CLOSE_VICE 39
 #define IN_MANUAL_PISTON_FORWARD 40
@@ -214,7 +214,6 @@ bool stopperToLow = false;
 //	Callbacks
 void (*pressureCallback)() = 0;
 
-
 byte saveDataVersion = 0;
 int jobConfigRingPosition = 0;
 unsigned long rodCount = 0;
@@ -252,6 +251,8 @@ long autoModeViceTimer = 0;
 bool displayStats = false;
 unsigned int thisJobRodCount = 0;
 bool autoModeHomeWasDown = false;
+
+bool inMaunalStopperWasDown = false;
 
 unsigned long lastExtrudeTimes[STATS_AVERAGE_TIME_SAMPLING_COUNT] = {0ul};
 unsigned long lastWaitTimes[STATS_AVERAGE_TIME_SAMPLING_COUNT] = {0ul};
@@ -294,11 +295,11 @@ void setup() {
 	SetupPin(IN_STOP_LOWERED, true, true);
 	SetupPin(OUT_RAISE_STOP, false);
 	SetupPin(OUT_LOWER_STOP, false);
+	SetupPin(OUT_STOPPER_RAISED, false);
 
 	SetupPin(IN_MANUAL_PISTON_FORWARD, true, true);
 	SetupPin(IN_MANUAL_PISTON_BACKWARD, true, true);
-	SetupPin(IN_MANUAL_LOWER_STOPPER, true, true);
-	SetupPin(IN_MANUAL_RAISE_STOPPER, true, true);
+	SetupPin(IN_MANUAL_TOGGLE_STOPPER, true, true);
 	SetupPin(IN_MANUAL_CLOSE_VICE, true, true);
 	SetupPin(IN_MANUAL_OPEN_VICE, true, true);
 
@@ -334,6 +335,9 @@ void loop() {
 		}
 	}
 
+	//	Always keep this in sync.
+	digitalWrite(OUT_STOPPER_RAISED, PURead(IN_STOP_RAISED));
+
 	currentPressure = analogRead(IN_ANALOG_PRESSURE);
 	if (currentPressure >= MAX_PRESSURE) {
 		if (pressureCallback != 0) {
@@ -367,6 +371,7 @@ void loop() {
 		LoopInit();
 	} else if (modeManual && !modeAuto && !modeInit) {
 		if (currentMode != ModeManual) {
+			inMaunalStopperWasDown = false;
 			StateChangeCleanup(true);
 			currentMode = ModeManual;
 			digitalWrite(OUT_MODE_INIT_LED, false);
@@ -732,13 +737,23 @@ void UpdatePositionManual() {
 void UpdateStopperManual() {
 	//	Check in safe zone to raise.
 	if (pistonPosition <= minPistonPosition + stopperSafePosition) {
-		if (PURead(IN_MANUAL_LOWER_STOPPER) && !PURead(IN_STOP_LOWERED)) {
-			stopperToLow = true;
-			digitalWrite(OUT_LOWER_STOP, true);
-		} else if (PURead(IN_MANUAL_RAISE_STOPPER) && !PURead(IN_STOP_RAISED)) {
-			stopperToHigh = true;
-			digitalWrite(OUT_RAISE_STOP, true);
+		bool inManualStopperIsDown = PURead(IN_MANUAL_TOGGLE_STOPPER);
+		if (inMaunalStopperWasDown && !inManualStopperIsDown) {
+			if (PURead(IN_STOP_LOWERED)) {
+				digitalWrite(OUT_LOWER_STOP, false);
+				digitalWrite(OUT_RAISE_STOP, true);
+				stopperToHigh = true;
+				stopperToLow = false;
+			} else if (PURead(IN_STOP_RAISED)) {
+				digitalWrite(OUT_LOWER_STOP, true);
+				digitalWrite(OUT_RAISE_STOP, false);
+				stopperToHigh = false;
+				stopperToLow = true;
+			}
 		}
+		inMaunalStopperWasDown = inManualStopperIsDown;
+	} else {
+		inMaunalStopperWasDown = false;
 	}
 }
 
