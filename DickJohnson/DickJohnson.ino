@@ -2,6 +2,7 @@
 #include "avr/eeprom.h"
 
 #define DEBUG_SERIAL
+//#define ENABLE_SAVE_TO_EEPROM
 
 #define SAVE_DATA_VERSION 2
 #define EEPROM_VERSION_ADDRESS 0
@@ -21,7 +22,8 @@
 #define STOPPER_PADDING 0.25f * POSITION_MULTIPLICATOR;
 
 #define MAX_PRESSURE 512
-#define RECALIBRATE_HOLD_TIME 2500
+#define RECALIBRATE_HOLD_TIME 2500l
+#define NON_CRITICAL_INPUTS_HOLD_TIME 250l
 
 #define POSITION_MULTIPLICATOR 1250
 #define PISTON_POSITION_ZERO_OFFSET 10000
@@ -46,45 +48,54 @@
 #define PISTON_POSITION_ENCODER_A_INTERRUPT 3
 #define PISTON_POSITION_ENCODER_B 21
 
-#define IN_MODE_INIT 22
-#define IN_MODE_MANUAL 53
-#define IN_MODE_AUTO 52
+#define IN_MODE_MANUAL 36
+#define IN_MODE_AUTO 44
 
-#define OUT_MODE_MANUAL_LED 51
-#define OUT_MODE_AUTO_LED 50
-#define OUT_MODE_INIT_LED 47
-#define OUT_PUMP_LED 24
+#define OUT_VALVE_FORWARD 27
+#define OUT_VALVE_FORWARD_LED 47
+#define OUT_VALVE_BACKWARD 29
+#define OUT_VALVE_BACKWARD_LED 45
 
-#define OUT_VALVE_FORWARD 26
-#define OUT_VALVE_BACKWARD 27
-
-#define IN_UNIT_SELECTOR 23
-#define IN_THREAD_TYPE_SELECTOR 29
-#define IN_PUMP 25
-#define IN_SET_EXTRUDE_LENGTH 48
-#define IN_SET_ROD_SIZE 49
+#define IN_UNIT_SELECTOR 48
+#define IN_THREAD_TYPE_SELECTOR 19
+#define IN_SET_EXTRUDE_LENGTH 50
+#define IN_SET_ROD_SIZE 52
 #define IN_HOME 46
 
 #define IN_ANALOG_PRESSURE 0
 
-#define OUT_RAISE_STOP 44
-#define OUT_LOWER_STOP 42
-#define IN_STOP_RAISED 45
-#define IN_STOP_LOWERED 43
+#define OUT_RAISE_STOP 23
+#define OUT_LOWER_STOP 25
+#define IN_STOP_RAISED 22
+#define IN_STOP_LOWERED 34
+#define OUT_STOPPER_RAISED_LED 43
 
-#define OUT_STOPPER_RAISED 36
-#define IN_MANUAL_TOGGLE_STOPPER 37
-#define IN_MANUAL_OPEN_VICE 38
-#define IN_MANUAL_CLOSE_VICE 39
-#define IN_MANUAL_PISTON_FORWARD 40
-#define IN_MANUAL_PISTON_BACKWARD 41
+#define IN_MANUAL_TOGGLE_STOPPER 26
+#define IN_MANUAL_OPEN_VICE 17
+#define IN_MANUAL_CLOSE_VICE 18
+#define IN_MANUAL_PISTON_FORWARD 24
+#define IN_MANUAL_PISTON_BACKWARD 28
 
-#define OUT_VICE_OPEN 35
-#define OUT_VICE_CLOSE 34
+#define OUT_VICE_OPEN 31
+#define OUT_VICE_OPEN_LED 49
+#define OUT_VICE_CLOSE 33
+#define OUT_VICE_CLOSE_LED 51
 
-#define OUT_DROP_OIL 33
+#define OUT_DROP_OIL 35
 
-#define IN_PEDAL 28
+#define IN_PEDAL 38
+
+#define IN_START_PUMP 32
+#define IN_STOP_PUMP 40
+#define OUT_PUMP 37
+
+#define IN_COOLANT 30
+#define OUT_COOLANT 53
+#define OUT_COOLANT_LED 41
+
+#define OUT_RELAY_ACTIVATOR 39
+
+#define IN_PANIC 42
 
 enum Mode {
 	ModeNone,
@@ -119,6 +130,7 @@ enum Message {
 	MessageConfigModeInitialized,
 	MessageAutoModeRunning,
 	MessageAutoModeStats,
+	MessagePANIC,
 
 	MessageCount,
 };
@@ -139,6 +151,7 @@ String messages[MessageCount][MessageCount] = {
 	{"D:      L:", ""},	//	MessageConfigModeInitialized
 	{"D:      L:", "C:"},	//	MessageAutoModeRunning
 	{"TC:       A:", "C:        W:"},	//	MessageAutoModeStats
+	{"Emergency stop.", ""},	//	MessagePANIC
 };
 
 Message currentMessage = MessageNone;
@@ -191,6 +204,7 @@ bool canReadExtrudeLength = false;
 bool pumpStarted = false;
 bool stopRaised = false;
 
+bool isPanicked = true;
 bool initialized = false;
 
 UnitType unitType = UNIT_MM;
@@ -207,6 +221,9 @@ int currentPressure = 0;
 
 int initModeHomeCount = 0;
 unsigned long homePressTime = -1;
+unsigned long calibrateVicePressTime = -1;
+unsigned long manualViceOpenPressTime = -1;
+unsigned long manualViceClosePressTime = -1;
 
 bool stopperToHigh = false;
 bool stopperToLow = false;
@@ -261,6 +278,9 @@ unsigned long refWaitTime = 0;
 unsigned long refExtrudeTime = 0;
 
 void setup() {
+	SetupPin(OUT_RELAY_ACTIVATOR, false);
+	digitalWrite(OUT_RELAY_ACTIVATOR, false);
+
 	lcd.begin(16, 2);
 	lcd.clear();
 	UpdateDisplayComplete();
@@ -271,44 +291,45 @@ void setup() {
 	SetupPin(PISTON_POSITION_ENCODER_A, true, true);
 	SetupPin(PISTON_POSITION_ENCODER_B, true, true);
 
-	SetupPin(IN_MODE_INIT, true, true);
 	SetupPin(IN_MODE_MANUAL, true, true);
 	SetupPin(IN_MODE_AUTO, true, true);
 
-	SetupPin(OUT_MODE_INIT_LED, false);
-	SetupPin(OUT_MODE_AUTO_LED, false);
-	SetupPin(OUT_MODE_MANUAL_LED, false);
-	SetupPin(OUT_PUMP_LED, false);
-
-	SetupPin(OUT_VALVE_FORWARD, false);
-	SetupPin(OUT_VALVE_BACKWARD, false);
-
+	SetupRelay(OUT_VALVE_FORWARD, OUT_VALVE_FORWARD_LED);
+	SetupRelay(OUT_VALVE_BACKWARD, OUT_VALVE_BACKWARD_LED);
+	
 	SetupPin(IN_UNIT_SELECTOR, true, true);
 	SetupPin(IN_THREAD_TYPE_SELECTOR, true, true);
 	SetupPin(IN_SET_EXTRUDE_LENGTH, true, true);
 	SetupPin(IN_SET_ROD_SIZE, true, true);
-	SetupPin(IN_PUMP, true, true);
-
+	
 	SetupPin(IN_HOME, true, true);
 
 	SetupPin(IN_STOP_RAISED, true, true);
 	SetupPin(IN_STOP_LOWERED, true, true);
-	SetupPin(OUT_RAISE_STOP, false);
-	SetupPin(OUT_LOWER_STOP, false);
-	SetupPin(OUT_STOPPER_RAISED, false);
+	SetupRelay(OUT_RAISE_STOP);
+	SetupRelay(OUT_LOWER_STOP);
+	SetupPin(OUT_STOPPER_RAISED_LED, false);
 
 	SetupPin(IN_MANUAL_PISTON_FORWARD, true, true);
 	SetupPin(IN_MANUAL_PISTON_BACKWARD, true, true);
 	SetupPin(IN_MANUAL_TOGGLE_STOPPER, true, true);
-	SetupPin(IN_MANUAL_CLOSE_VICE, true, true);
 	SetupPin(IN_MANUAL_OPEN_VICE, true, true);
+	SetupPin(IN_MANUAL_CLOSE_VICE, true, true);
 
-	SetupPin(OUT_VICE_OPEN, false);
-	SetupPin(OUT_VICE_CLOSE, false);
+	SetupRelay(OUT_VICE_OPEN, OUT_VICE_OPEN_LED);
+	SetupRelay(OUT_VICE_CLOSE, OUT_VICE_CLOSE_LED);
 
-	SetupPin(OUT_DROP_OIL, false);
+	SetupRelay(OUT_DROP_OIL);
+	SetupPin(IN_COOLANT, true, true);
+	SetupRelay(OUT_COOLANT, OUT_COOLANT_LED);
+	
+	SetupPin(IN_START_PUMP, true, true);
+	SetupPin(IN_STOP_PUMP, true, true);
+	SetupRelay(OUT_PUMP);
 
 	SetupPin(IN_PEDAL, true, true);
+
+	SetupPin(IN_PANIC, true, true);
 
 	SetupPin(13, false);
 
@@ -320,14 +341,49 @@ void setup() {
 	randomSeed(analogRead(15));
 
 	LoadEEPROM();
+
+	digitalWrite(OUT_RELAY_ACTIVATOR, true);
 }
 
 void loop() {
-	bool pump = PURead(IN_PUMP);
-	if (pump != pumpStarted) {
-		pumpStarted = pump;
-		digitalWrite(OUT_PUMP_LED, pumpStarted);
+	bool newPanic = PURead(IN_PANIC);
 
+	if (newPanic != isPanicked) {
+		if (newPanic) {
+			StateChangeCleanup();
+			initialized = false;
+			pumpStarted = false;
+			RelayWrite(OUT_PUMP, false);
+			RelayWrite(OUT_COOLANT, false, OUT_COOLANT_LED);
+
+			currentMessage = MessagePANIC;
+			UpdateDisplayComplete();
+			return;
+		} else {
+
+		}
+
+		isPanicked = newPanic;
+	}
+
+	if (isPanicked) {
+		return;
+	}
+
+	bool newPumpStarted = pumpStarted;
+	if (newPumpStarted) {
+		if (!PURead(IN_STOP_PUMP)) {
+			newPumpStarted = false;
+		}
+	} else {
+		if (PURead(IN_START_PUMP) && PURead(IN_STOP_PUMP)) {
+			newPumpStarted = true;
+		}
+	}
+
+	if (newPumpStarted != pumpStarted) {
+		pumpStarted = newPumpStarted;
+		
 		if (!pumpStarted) {
 			StateChangeCleanup();
 			initState = InitStateWaiting;
@@ -336,32 +392,31 @@ void loop() {
 	}
 
 	//	Always keep this in sync.
-	digitalWrite(OUT_STOPPER_RAISED, PURead(IN_STOP_RAISED));
+	digitalWrite(OUT_STOPPER_RAISED_LED, PURead(IN_STOP_RAISED));
+	RelayWrite(OUT_COOLANT, PURead(IN_COOLANT), OUT_COOLANT_LED);
 
 	currentPressure = analogRead(IN_ANALOG_PRESSURE);
 	if (currentPressure >= MAX_PRESSURE) {
 		if (pressureCallback != 0) {
 			pressureCallback();
 		}
-		digitalWrite(OUT_VALVE_BACKWARD, false);
-		digitalWrite(OUT_VALVE_FORWARD, false);
+		RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
+		RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
 	}
 
-	bool modeInit = PURead(IN_MODE_INIT);
 	bool modeManual = PURead(IN_MODE_MANUAL);
 	bool modeAuto = PURead(IN_MODE_AUTO);
 
-	if (modeInit && !modeManual && !modeAuto) {
+	if (!modeManual && !modeAuto) {
 		if (currentMode != ModeInit) {
+#ifdef DEBUG_SERIAL
+			Serial.print("Set mode Init\n");
+#endif
 			StateChangeCleanup(true);
 			currentMode = ModeInit;
 
 			initModeHomeCount = 0;
 			initState = InitStateWaiting;
-
-			digitalWrite(OUT_MODE_MANUAL_LED, false);
-			digitalWrite(OUT_MODE_AUTO_LED, false);
-			digitalWrite(OUT_MODE_INIT_LED, true);
 
 			if (canReadRodSize || canReadExtrudeLength) {
 				detachInterrupt(CONFIG_ENCODER_A_INTERRUPT);
@@ -369,26 +424,28 @@ void loop() {
 			}
 		}
 		LoopInit();
-	} else if (modeManual && !modeAuto && !modeInit) {
+	} else if (modeManual && !modeAuto) {
 		if (currentMode != ModeManual) {
+#ifdef DEBUG_SERIAL
+			Serial.print("Set mode Manual\n");
+#endif
 			inMaunalStopperWasDown = false;
 			StateChangeCleanup(true);
 			currentMode = ModeManual;
-			digitalWrite(OUT_MODE_INIT_LED, false);
-			digitalWrite(OUT_MODE_AUTO_LED, false);
-			digitalWrite(OUT_MODE_MANUAL_LED, true);
+			manualViceOpenPressTime = -1;
+			manualViceClosePressTime = -1;
+			
 			canReadRodSize = canReadExtrudeLength = false;
 		}
 		LoopManual();
-	} else if (!modeInit && !modeManual && modeAuto) {
+	} else if (!modeManual && modeAuto) {
 		if (currentMode != ModeAuto) {
+#ifdef DEBUG_SERIAL
+			Serial.print("Set mode Auto\n");
+#endif
 			StateChangeCleanup(true);
 			currentMode = ModeAuto;
 			autoState = AutoStateFirstRunGoHome;
-
-			digitalWrite(OUT_MODE_INIT_LED, false);
-			digitalWrite(OUT_MODE_AUTO_LED, true);
-			digitalWrite(OUT_MODE_MANUAL_LED, false);
 
 			if (canReadRodSize || canReadExtrudeLength) {
 				detachInterrupt(CONFIG_ENCODER_A_INTERRUPT);
@@ -460,13 +517,13 @@ void StateChangeCleanup() {
 
 void StateChangeCleanup(bool leaveMode) {
 	stopperToHigh = stopperToLow = false;
-	digitalWrite(OUT_VALVE_FORWARD, false);
-	digitalWrite(OUT_VALVE_BACKWARD, false);
-	digitalWrite(OUT_RAISE_STOP, false);
-	digitalWrite(OUT_LOWER_STOP, false);
-	digitalWrite(OUT_VICE_OPEN, false);
-	digitalWrite(OUT_VICE_CLOSE, false);
-	digitalWrite(OUT_DROP_OIL, false);
+	RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
+	RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
+	RelayWrite(OUT_RAISE_STOP, false);
+	RelayWrite(OUT_LOWER_STOP, false);
+	RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
+	RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
+	RelayWrite(OUT_DROP_OIL, false);
 
 	if (leaveMode) {
 		switch (currentMode) {
@@ -536,7 +593,11 @@ void LoopInit() {
 
 void InitWaitInput() {
 	if (PURead(IN_MANUAL_OPEN_VICE) && PURead(IN_MANUAL_CLOSE_VICE)) {
-		if (initState != InitStateCalibrateViceRaiseTime) {
+		if (calibrateVicePressTime == -1) {
+			calibrateVicePressTime = millis();
+		}
+		if ((millis() - calibrateVicePressTime) > RECALIBRATE_HOLD_TIME && initState != InitStateCalibrateViceRaiseTime) {
+			calibrateVicePressTime = -1;
 			initState = InitStateCalibrateViceRaiseTime;
 			detachInterrupt(CONFIG_ENCODER_A_INTERRUPT);
 			canReadRodSize = false;
@@ -558,7 +619,7 @@ void InitWaitInput() {
 		if (!initialized || initModeHomeCount == 0 || heldTime < RECALIBRATE_HOLD_TIME) {
 			initState = InitStateZeroing;
 			pressureCallback = &ZeroingPressureCallback;
-			digitalWrite(OUT_VALVE_BACKWARD, true);	
+			RelayWrite(OUT_VALVE_BACKWARD, true, OUT_VALVE_BACKWARD_LED);
 			initModeHomeCount = 1;
 		} else {
 			switch (initModeHomeCount) {
@@ -580,6 +641,14 @@ void InitWaitInput() {
 }
 
 void Zeroing() {
+	if (pressureCallback == 0) {
+		if (PURead(IN_STOP_LOWERED)) {
+			initialized = true;
+			initState = InitStateWaiting;
+		} else {
+			RelayWrite(OUT_LOWER_STOP, true);
+		}
+	}
 }
 
 void ZeroingPressureCallback() {
@@ -589,19 +658,17 @@ void ZeroingPressureCallback() {
 
 	attachInterrupt(PISTON_POSITION_ENCODER_A_INTERRUPT, PistonPositionInterrupt, CHANGE);
 
-	initialized = true;
-	initState = InitStateWaiting;
 	pressureCallback = 0;
 }
 
 void CalibrateStroke() {
 	if (!PURead(IN_STOP_RAISED)) {
-		digitalWrite(OUT_RAISE_STOP, true);
-		digitalWrite(OUT_VALVE_FORWARD, false);
+		RelayWrite(OUT_RAISE_STOP, true);
+		RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
 		return;
 	} else {
-		digitalWrite(OUT_RAISE_STOP, false);
-		digitalWrite(OUT_VALVE_FORWARD, true);
+		RelayWrite(OUT_RAISE_STOP, false);
+		RelayWrite(OUT_VALVE_FORWARD, true, OUT_VALVE_FORWARD_LED);
 	}
 }
 
@@ -703,34 +770,34 @@ void LeaveModeInit() {
 }
 
 void UpdatePositionManual() {
-	if (PURead(IN_MANUAL_PISTON_FORWARD)) {
+	if (PURead(IN_MANUAL_PISTON_FORWARD) && PURead(IN_STOP_RAISED)) {
 		if (pistonPosition < maxPistonPosition) {
-			digitalWrite(OUT_VALVE_FORWARD, true);
-			digitalWrite(OUT_VALVE_BACKWARD, false);
+			RelayWrite(OUT_VALVE_FORWARD, true, OUT_VALVE_FORWARD_LED);
+			RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
 		} else {
-			digitalWrite(OUT_VALVE_FORWARD, false);
-			digitalWrite(OUT_VALVE_BACKWARD, false);
+			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
+			RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
 			return;
 		}
 	} else if (PURead(IN_MANUAL_PISTON_BACKWARD)) {
 		if (pistonPosition > minPistonPosition) {
-			digitalWrite(OUT_VALVE_FORWARD, false);
-			digitalWrite(OUT_VALVE_BACKWARD, true);
+			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
+			RelayWrite(OUT_VALVE_BACKWARD, true, OUT_VALVE_BACKWARD_LED);
 		} else {
-			digitalWrite(OUT_VALVE_FORWARD, false);
-			digitalWrite(OUT_VALVE_BACKWARD, false);
+			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
+			RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
 			return;
 		}
 	} else {
-		digitalWrite(OUT_VALVE_FORWARD, false);
-		digitalWrite(OUT_VALVE_BACKWARD, false);
+		RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
+		RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
 		return;
 	}
 
 	//	Fail safe.
 	if (currentPressure > MAX_PRESSURE) {
-		digitalWrite(OUT_VALVE_FORWARD, false);
-		digitalWrite(OUT_VALVE_BACKWARD, false);
+		RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
+		RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
 	}
 }
 
@@ -740,13 +807,13 @@ void UpdateStopperManual() {
 		bool inManualStopperIsDown = PURead(IN_MANUAL_TOGGLE_STOPPER);
 		if (inMaunalStopperWasDown && !inManualStopperIsDown) {
 			if (PURead(IN_STOP_LOWERED)) {
-				digitalWrite(OUT_LOWER_STOP, false);
-				digitalWrite(OUT_RAISE_STOP, true);
+				RelayWrite(OUT_LOWER_STOP, false);
+				RelayWrite(OUT_RAISE_STOP, true);
 				stopperToHigh = true;
 				stopperToLow = false;
 			} else if (PURead(IN_STOP_RAISED)) {
-				digitalWrite(OUT_LOWER_STOP, true);
-				digitalWrite(OUT_RAISE_STOP, false);
+				RelayWrite(OUT_LOWER_STOP, true);
+				RelayWrite(OUT_RAISE_STOP, false);
 				stopperToHigh = false;
 				stopperToLow = true;
 			}
@@ -758,17 +825,38 @@ void UpdateStopperManual() {
 }
 
 void UpdateViceManual() {
-	if (PURead(IN_MANUAL_OPEN_VICE)) {
-		digitalWrite(OUT_VICE_OPEN, true);
-		digitalWrite(OUT_VICE_CLOSE, false);
-	} else if ((PURead(IN_MANUAL_CLOSE_VICE) || PURead(IN_PEDAL))
-		&& currentRodSizeIndex >= 0
-		&& currentPressure <= extrusionTable[currentRodSizeIndex].viceMaxPressure) {
-		digitalWrite(OUT_VICE_OPEN, false);
-		digitalWrite(OUT_VICE_CLOSE, true);
+	bool open = PURead(IN_MANUAL_OPEN_VICE);
+	bool close = PURead(IN_MANUAL_CLOSE_VICE);
+
+	if (open) {
+		if (manualViceOpenPressTime == -1) {
+			manualViceOpenPressTime = millis();
+		}
 	} else {
-		digitalWrite(OUT_VICE_OPEN, false);
-		digitalWrite(OUT_VICE_CLOSE, false);
+		manualViceOpenPressTime = -1;
+	}
+
+	if (close) {
+		if (manualViceClosePressTime == -1) {
+			manualViceClosePressTime = millis();
+		}
+	} else {
+		manualViceClosePressTime = -1;
+	}
+
+	if (open && (millis() - manualViceOpenPressTime) > NON_CRITICAL_INPUTS_HOLD_TIME) {
+		RelayWrite(OUT_VICE_OPEN, true, OUT_VICE_OPEN_LED);
+		RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
+	} else if ((close && (millis() - manualViceClosePressTime) > NON_CRITICAL_INPUTS_HOLD_TIME)
+			|| PURead(IN_PEDAL)
+			&& currentRodSizeIndex >= 0
+			&& currentPressure <= extrusionTable[currentRodSizeIndex].viceMaxPressure) {
+
+		RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
+		RelayWrite(OUT_VICE_CLOSE, true, OUT_VICE_CLOSE_LED);
+	} else {
+		RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
+		RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
 	}
 }
 
@@ -780,12 +868,12 @@ void LoopManual() {
 	} else if (stopperToHigh) {
 		if (PURead(IN_STOP_RAISED)) {
 			stopperToHigh = false;
-			digitalWrite(OUT_RAISE_STOP, false);
+			RelayWrite(OUT_RAISE_STOP, false);
 		}
 	} else if (stopperToLow) {
 		if (PURead(IN_STOP_LOWERED)) {
 			stopperToLow = false;
-			digitalWrite(OUT_LOWER_STOP, false);
+			RelayWrite(OUT_LOWER_STOP, false);
 		}
 	} else if (initialized && pistonStrokeLength > 0 && stopperSafePosition > 0) {
 		UpdatePositionManual();
@@ -794,11 +882,18 @@ void LoopManual() {
 	} else {
 		//	Only allow open vice.
 		if (PURead(IN_MANUAL_OPEN_VICE)) {
-			digitalWrite(OUT_VICE_OPEN, true);
-			digitalWrite(OUT_VICE_CLOSE, false);
+			if (manualViceOpenPressTime == -1) {
+				manualViceOpenPressTime = millis();
+			} else {
+				if ((millis() - manualViceOpenPressTime) > NON_CRITICAL_INPUTS_HOLD_TIME) {
+					RelayWrite(OUT_VICE_OPEN, true, OUT_VICE_OPEN_LED);
+					RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
+				}
+			}
 		} else {
-			digitalWrite(OUT_VICE_CLOSE, false);
-			digitalWrite(OUT_VICE_OPEN, false);
+			manualViceOpenPressTime = -1;
+			RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
+			RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
 		}
 	}
 
@@ -853,7 +948,7 @@ void LoopAuto() {
 		}
 		break;
 	case AutoStateStartOil:
-		digitalWrite(OUT_DROP_OIL, true);
+		RelayWrite(OUT_DROP_OIL, true);
 		autoState = AutoStateWaitPedal;
 		break;
 	case AutoStateWaitPedal:
@@ -876,7 +971,7 @@ void LoopAuto() {
 		}
 		break;
 	case AutoStateStopOil:
-		digitalWrite(OUT_DROP_OIL, false);
+		RelayWrite(OUT_DROP_OIL, false);
 		autoState = AutoStateRaiseStopper;
 		break;
 	case AutoStateRaiseStopper:
@@ -889,8 +984,8 @@ void LoopAuto() {
 			autoState = AutoStateMoveBackwardPostExtrude;
 		} else {
 			if (currentPressure > autoModeExtrudePressure) {
-				digitalWrite(OUT_VALVE_BACKWARD, false);
-				digitalWrite(OUT_VALVE_FORWARD, false);
+				RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
+				RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
 				autoState = AutoStateErrorExtrudePressure;
 				currentMessage = MessageErrorExtrudePressure;
 				UpdateDisplayComplete();
@@ -961,21 +1056,21 @@ void LoopAuto() {
 bool GotoDestination(int destination, int threshold, bool continueIf) {
 	if (continueIf == HIGH) {
 		if (pistonPosition <= (destination + threshold)) {
-			digitalWrite(OUT_VALVE_BACKWARD, false);
-			digitalWrite(OUT_VALVE_FORWARD, false);
+			RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
+			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
 			return true;
 		} else {
-			digitalWrite(OUT_VALVE_BACKWARD, true);
-			digitalWrite(OUT_VALVE_FORWARD, false);
+			RelayWrite(OUT_VALVE_BACKWARD, true, OUT_VALVE_BACKWARD_LED);
+			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
 		}
 	} else {
 		if (pistonPosition >= (destination - threshold)) {
-			digitalWrite(OUT_VALVE_BACKWARD, false);
-			digitalWrite(OUT_VALVE_FORWARD, false);
+			RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
+			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
 			return true;
 		} else {
-			digitalWrite(OUT_VALVE_BACKWARD, false);
-			digitalWrite(OUT_VALVE_FORWARD, true);
+			RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
+			RelayWrite(OUT_VALVE_FORWARD, true, OUT_VALVE_FORWARD_LED);
 		}
 	}
 
@@ -985,21 +1080,21 @@ bool GotoDestination(int destination, int threshold, bool continueIf) {
 bool MoveStopper(bool destination) {
 	if (destination == HIGH) {
 		if (PURead(IN_STOP_RAISED)) {
-			digitalWrite(OUT_RAISE_STOP, false);
-			digitalWrite(OUT_LOWER_STOP, false);
+			RelayWrite(OUT_RAISE_STOP, false);
+			RelayWrite(OUT_LOWER_STOP, false);
 			return true;
 		} else {
-			digitalWrite(OUT_RAISE_STOP, true);
-			digitalWrite(OUT_LOWER_STOP, false);
+			RelayWrite(OUT_RAISE_STOP, true);
+			RelayWrite(OUT_LOWER_STOP, false);
 		}
 	} else {
 		if (PURead(IN_STOP_LOWERED)) {
-			digitalWrite(OUT_RAISE_STOP, false);
-			digitalWrite(OUT_LOWER_STOP, false);
+			RelayWrite(OUT_RAISE_STOP, false);
+			RelayWrite(OUT_LOWER_STOP, false);
 			return true;
 		} else {
-			digitalWrite(OUT_RAISE_STOP, false);
-			digitalWrite(OUT_LOWER_STOP, true);
+			RelayWrite(OUT_RAISE_STOP, false);
+			RelayWrite(OUT_LOWER_STOP, true);
 		}
 	}
 
@@ -1011,21 +1106,21 @@ bool MoveVice(bool destination) {
 		unsigned long curTime = millis();
 		if (autoModeViceTimer <= curTime) {
 			autoModeViceTimer = 0;
-			digitalWrite(OUT_VICE_CLOSE, false);
-			digitalWrite(OUT_VICE_OPEN, false);
+			RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
+			RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
 			return true;
 		} else {
-			digitalWrite(OUT_VICE_CLOSE, false);
-			digitalWrite(OUT_VICE_OPEN, true);
+			RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
+			RelayWrite(OUT_VICE_OPEN, true, OUT_VICE_OPEN_LED);
 		}
 	} else {
 		if (currentPressure >= autoModeVicePressure) {
-			digitalWrite(OUT_VICE_CLOSE, false);
-			digitalWrite(OUT_VICE_OPEN, false);
+			RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
+			RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
 			return true;
 		} else {
-			digitalWrite(OUT_VICE_CLOSE, true);
-			digitalWrite(OUT_VICE_OPEN, false);
+			RelayWrite(OUT_VICE_CLOSE, true, OUT_VICE_CLOSE_LED);
+			RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
 		}
 	}
 
@@ -1292,6 +1387,7 @@ void LoadEEPROM() {
 }
 
 void SaveSystemSettings() {
+#ifdef ENABLE_SAVE_TO_EEPROM
 	bool initEEPROM = saveDataVersion != SAVE_DATA_VERSION;
 
 	saveDataVersion = SAVE_DATA_VERSION;
@@ -1345,6 +1441,7 @@ void SaveSystemSettings() {
 #ifdef DEBUG_SERIAL
 	Serial.print("Save complete!\n");
 #endif
+#endif
 }
 
 int GetJobConfigEEPROMAddress() {
@@ -1360,6 +1457,7 @@ int GetRodCountEEPROM_Address() {
 }
 
 void SaveJobConfig() {
+#ifdef ENABLE_SAVE_TO_EEPROM
 	if (loadedJobConfig.rodSize != currentJobConfig.rodSize &&
 		loadedJobConfig.extrudeLength != currentJobConfig.extrudeLength &&
 		saveDataVersion == SAVE_DATA_VERSION) {
@@ -1383,6 +1481,7 @@ void SaveJobConfig() {
 
 		eeprom_busy_wait();
 	}
+#endif
 }
 
 void IncrementCount() {
@@ -1398,7 +1497,9 @@ void IncrementCount() {
 
 		unsigned int c = eeprom_read_word((unsigned int*)curAdd);
 		c++;
+#ifdef ENABLE_SAVE_TO_EEPROM
 		eeprom_write_word((unsigned int*)curAdd, c);
+#endif
 	}
 
 	if (currentMessage == MessageAutoModeRunning || currentMessage == MessageAutoModeStats) {
@@ -1423,6 +1524,29 @@ void SetupPin(int pin, bool in, bool pullUp) {
 	}
 }
 
+void SetupRelay(int pin) {
+	SetupRelay(pin, -1);
+}
+
+void SetupRelay(int pin, int led) {
+	pinMode(pin, OUTPUT);
+	digitalWrite(pin, true);
+	if (led > -1) {
+		pinMode(led, OUTPUT);
+	}
+}
+
 bool PURead(int pin) {
 	return !digitalRead(pin);
+}
+
+void RelayWrite(int relayPin, bool enabled) {
+	RelayWrite(relayPin, enabled, -1);
+}
+
+void RelayWrite(int relayPin, bool enabled, int ledPin) {
+	digitalWrite(relayPin, !enabled);
+	if (ledPin > -1) {
+		digitalWrite(ledPin, enabled);
+	}
 }
