@@ -643,6 +643,7 @@ void InitWaitInput() {
 void Zeroing() {
 	if (pressureCallback == 0) {
 		if (PURead(IN_STOP_LOWERED)) {
+			RelayWrite(OUT_LOWER_STOP, false);
 			initialized = true;
 			initState = InitStateWaiting;
 		} else {
