@@ -4,7 +4,7 @@
 #define DEBUG_SERIAL
 //#define ENABLE_SAVE_TO_EEPROM
 
-#define SAVE_DATA_VERSION 2
+#define SAVE_DATA_VERSION 3
 #define EEPROM_VERSION_ADDRESS 0
 #define JOB_CONFIG_RING_COUNT 8
 #define ROD_COUNT_RING_COUNT  32
@@ -18,17 +18,16 @@
 #define MAX_EXTRUDE_LENGTH 6.0f * EXTRUDE_LENGTH_MULTIPLICATOR
 #define EXTRUDE_LENGTH_MULTIPLICATOR 1250
 
-#define STOPPER_THICKNESS 1.0f * POSITION_MULTIPLICATOR;
-#define STOPPER_PADDING 0.25f * POSITION_MULTIPLICATOR;
+#define STOPPER_THICKNESS 0.375f * positionMultiplicator
+#define STOPPER_PADDING 0.25f * positionMultiplicator
 
 #define MAX_PRESSURE 512
 #define RECALIBRATE_HOLD_TIME 2500l
 #define NON_CRITICAL_INPUTS_HOLD_TIME 250l
 
-#define POSITION_MULTIPLICATOR 1250
 #define PISTON_POSITION_ZERO_OFFSET 10000
-#define PISTON_POSITION_PADDING 0.125f * POSITION_MULTIPLICATOR
-#define PISTON_POSITION_DESTINATION_THRESHOLD 0.01f * POSITION_MULTIPLICATOR
+#define PISTON_POSITION_PADDING 0.125f * positionMultiplicator
+#define PISTON_POSITION_DESTINATION_THRESHOLD 0.01f * positionMultiplicator
 
 #define VICE_RAISE_TIMER_MIN 100
 #define VICE_RAISE_TIMER_MAX 5000
@@ -70,7 +69,7 @@
 #define IN_STOP_LOWERED 34
 #define OUT_STOPPER_RAISED_LED 43
 
-#define IN_MANUAL_TOGGLE_STOPPER 26
+#define IN_MANUAL_TOGGLE_STOPPER 16
 #define IN_MANUAL_OPEN_VICE 17
 #define IN_MANUAL_CLOSE_VICE 18
 #define IN_MANUAL_PISTON_FORWARD 24
@@ -96,6 +95,8 @@
 #define OUT_RELAY_ACTIVATOR 39
 
 #define IN_PANIC 42
+
+#define IN_MAXIMUM_PISTON_POSITION 26
 
 enum Mode {
 	ModeNone,
@@ -125,6 +126,7 @@ enum Message {
 	MessageConfigModeMissingConfig,
 	MessageConfigModeZeroInProgress,
 	MessageConfigModeCalibrateStroke,
+	MessageConfigModeCalibrateStrokeEnterReal,
 	MessageConfigModeCalibrateStropper,
 	MessageConfigModeCalibrateViceRaiseTimer,
 	MessageConfigModeInitialized,
@@ -146,6 +148,7 @@ String messages[MessageCount][MessageCount] = {
 	{"D:      L:", "Missing Config"},	//	MessageConfigModeMissingConfig
 	{"D:      L:", "Zero in progress"},	//	MessageConfigModeZeroInProgress
 	{"D:      L:", "Calc Stroke"},	//	MessageConfigModeCalibrateStroke
+	{"D:      L:", "Real:"},	//	MessageConfigModeCalibrateStrokeEnterReal
 	{"D:      L:", "HOME when clear"},	//	MessageConfigModeCalibrateStropper
 	{"D:      L:", "Raise Time: "},	//	MessageConfigModeCalibrateViceRaiseTimer
 	{"D:      L:", ""},	//	MessageConfigModeInitialized
@@ -212,6 +215,9 @@ ThreadType threadType = THREAD_NC;
 
 unsigned int pistonPosition = 0;
 unsigned int pistonStrokeLength = 0;
+unsigned int realStrokeLength = (int)(7.0f * (float)EXTRUDE_LENGTH_MULTIPLICATOR);
+float positionMultiplicator = 333.333333f;
+
 unsigned int stopperSafePosition = 0;
 unsigned int minPistonPosition = 0;
 unsigned int maxPistonPosition = 0;
@@ -224,12 +230,14 @@ unsigned long homePressTime = -1;
 unsigned long calibrateVicePressTime = -1;
 unsigned long manualViceOpenPressTime = -1;
 unsigned long manualViceClosePressTime = -1;
+unsigned long toggleStopperPressTime = -1;
 
 bool stopperToHigh = false;
 bool stopperToLow = false;
 
 //	Callbacks
 void (*pressureCallback)() = 0;
+void (*maximumPositionCallback)() = 0;
 
 byte saveDataVersion = 0;
 int jobConfigRingPosition = 0;
@@ -268,8 +276,6 @@ long autoModeViceTimer = 0;
 bool displayStats = false;
 unsigned int thisJobRodCount = 0;
 bool autoModeHomeWasDown = false;
-
-bool inMaunalStopperWasDown = false;
 
 unsigned long lastExtrudeTimes[STATS_AVERAGE_TIME_SAMPLING_COUNT] = {0ul};
 unsigned long lastWaitTimes[STATS_AVERAGE_TIME_SAMPLING_COUNT] = {0ul};
@@ -331,7 +337,7 @@ void setup() {
 
 	SetupPin(IN_PANIC, true, true);
 
-	SetupPin(13, false);
+	SetupPin(IN_MAXIMUM_PISTON_POSITION, true, true);
 
 #ifdef DEBUG_SERIAL
 	Serial.begin(9600);
@@ -358,6 +364,8 @@ void loop() {
 
 			currentMessage = MessagePANIC;
 			UpdateDisplayComplete();
+
+			currentMode = ModeNone;
 			return;
 		} else {
 
@@ -402,6 +410,15 @@ void loop() {
 		}
 		RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
 		RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
+		RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
+		RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
+	}
+
+	if (PURead(IN_MAXIMUM_PISTON_POSITION)) {
+		if (maximumPositionCallback != 0) {
+			maximumPositionCallback();
+		}
+		RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
 	}
 
 	bool modeManual = PURead(IN_MODE_MANUAL);
@@ -418,6 +435,9 @@ void loop() {
 			initModeHomeCount = 0;
 			initState = InitStateWaiting;
 
+			pressureCallback = 0;
+			maximumPositionCallback = 0;
+
 			if (canReadRodSize || canReadExtrudeLength) {
 				detachInterrupt(CONFIG_ENCODER_A_INTERRUPT);
 				canReadExtrudeLength = canReadRodSize = false;
@@ -429,12 +449,14 @@ void loop() {
 #ifdef DEBUG_SERIAL
 			Serial.print("Set mode Manual\n");
 #endif
-			inMaunalStopperWasDown = false;
+			toggleStopperPressTime = -1;
 			StateChangeCleanup(true);
 			currentMode = ModeManual;
 			manualViceOpenPressTime = -1;
 			manualViceClosePressTime = -1;
+			toggleStopperPressTime = -1;
 			
+			prevRodSize = prevExtrudeLength = 0;
 			canReadRodSize = canReadExtrudeLength = false;
 		}
 		LoopManual();
@@ -461,12 +483,13 @@ void loop() {
 					len = extrusionTable[currentRodSizeIndex].nfExtrudeNeeded;
 				}
 
-				float realLen = (float)currentJobConfig.extrudeLength/(float)POSITION_MULTIPLICATOR;
-				autoModeStartPos = maxPistonPosition - (int)(realLen * len * (float)POSITION_MULTIPLICATOR) - STOPPER_THICKNESS;
-				autoModeBackPos = maxPistonPosition - (int)(realLen * (float)POSITION_MULTIPLICATOR) - STOPPER_THICKNESS - STOPPER_PADDING;
+				float realLen = (float)currentJobConfig.extrudeLength/(float)EXTRUDE_LENGTH_MULTIPLICATOR;
+				autoModeStartPos = maxPistonPosition - (int)((realLen / (1.0f/len)) * (float)positionMultiplicator) - STOPPER_THICKNESS - (int)(0.375f * positionMultiplicator);
+				autoModeBackPos = maxPistonPosition - (int)(realLen * (float)positionMultiplicator) - STOPPER_THICKNESS - STOPPER_PADDING - (int)(0.375f * positionMultiplicator);
+				autoModeBackPos = min(minPistonPosition + stopperSafePosition, autoModeBackPos);
 				autoModeRaiseStopperPos = autoModeStartPos - STOPPER_PADDING;
 				autoModeRaiseStopperPos = min(minPistonPosition + stopperSafePosition, autoModeRaiseStopperPos);
-				autoModeExtrudePos = maxPistonPosition;
+				autoModeExtrudePos = maxPistonPosition + 1000;
 				autoModeVicePressure = extrusionTable[currentRodSizeIndex].viceMaxPressure;
 				autoModeExtrudePressure = extrusionTable[currentRodSizeIndex].extrudeMaxPressure;
 
@@ -479,26 +502,28 @@ void loop() {
 					lastWaitTimes[i] = lastExtrudeTimes[i] = 0;
 				}
 
+				pressureCallback = 0;
+				maximumPositionCallback = &MaximumPositionReached;
+
 #ifdef DEBUG_SERIAL
 				Serial.print("autoModeStartPos: ");
-				Serial.print(((float)autoModeStartPos / (float)POSITION_MULTIPLICATOR));
+				Serial.print(((float)(maxPistonPosition - autoModeStartPos) / (float)positionMultiplicator));
 				Serial.print("\n");
 				Serial.print("autoModeBackPos: ");
-				Serial.print(((float)autoModeBackPos / (float)POSITION_MULTIPLICATOR));
+				Serial.print(((float)(maxPistonPosition - autoModeBackPos) / (float)positionMultiplicator));
 				Serial.print("\n");
 				Serial.print("autoModeRaiseStopperPos: ");
-				Serial.print(((float)autoModeRaiseStopperPos / (float)POSITION_MULTIPLICATOR));
+				Serial.print(((float)(maxPistonPosition - autoModeRaiseStopperPos) / (float)positionMultiplicator));
 				Serial.print("\n");
 				Serial.print("autoModeExtrudePos: ");
-				Serial.print(((float)autoModeExtrudePos / (float)POSITION_MULTIPLICATOR));
+				Serial.print(((float)(maxPistonPosition - autoModeExtrudePos) / (float)positionMultiplicator));
 				Serial.print("\n");
 				Serial.print("autoModeVicePressure: ");
 				Serial.print(autoModeVicePressure);
 				Serial.print("\n");
 				Serial.print("autoModeExtrudePressure: ");
 				Serial.print(autoModeExtrudePressure);
-				Serial.print("\n");
-				
+				Serial.print("\n");				
 #endif
 			} else {
 				//	TODO Error.
@@ -549,7 +574,11 @@ void LoopInit() {
 			currentMessage = MessageConfigModeZeroInProgress;
 			break;
 		case InitStateCalibrateStroke:
-			currentMessage = MessageConfigModeCalibrateStroke;
+			if (pressureCallback == 0) {
+				currentMessage = MessageConfigModeCalibrateStrokeEnterReal;
+			} else {
+				currentMessage = MessageConfigModeCalibrateStroke;
+			}
 			break;
 		case InitStateCalibrateStopper:
 			currentMessage = MessageConfigModeCalibrateStropper;
@@ -592,6 +621,10 @@ void LoopInit() {
 }
 
 void InitWaitInput() {
+	if (!pumpStarted) {
+		return;
+	}
+
 	if (PURead(IN_MANUAL_OPEN_VICE) && PURead(IN_MANUAL_CLOSE_VICE)) {
 		if (calibrateVicePressTime == -1) {
 			calibrateVicePressTime = millis();
@@ -619,22 +652,27 @@ void InitWaitInput() {
 		if (!initialized || initModeHomeCount == 0 || heldTime < RECALIBRATE_HOLD_TIME) {
 			initState = InitStateZeroing;
 			pressureCallback = &ZeroingPressureCallback;
+			maximumPositionCallback = 0;
 			RelayWrite(OUT_VALVE_BACKWARD, true, OUT_VALVE_BACKWARD_LED);
 			initModeHomeCount = 1;
 		} else {
 			switch (initModeHomeCount) {
-			    case 1:
-			      initState = InitStateCalibrateStroke;
-			      pressureCallback = &CalibrateStrokePressureCallback;
-			      initModeHomeCount = 2;
-			      break;
-			    case 2:
-			      initState = InitStateCalibrateStopper;
-			      initModeHomeCount = 0;
-			      break;
-			    default:
-			      initModeHomeCount = 0;
-			      break;
+				case 1:
+					canReadRodSize = false;
+					canReadExtrudeLength = false;
+					initState = InitStateCalibrateStroke;
+					pressureCallback = &CalibrateStrokeCallback;
+					maximumPositionCallback = &CalibrateStrokeCallback;
+
+					initModeHomeCount = 2;
+					break;
+				case 2:
+					initState = InitStateCalibrateStopper;
+					initModeHomeCount = 0;
+					break;
+				default:
+					initModeHomeCount = 0;
+					break;
 			}
 		}
 	}
@@ -655,7 +693,7 @@ void Zeroing() {
 void ZeroingPressureCallback() {
 	pistonPosition = PISTON_POSITION_ZERO_OFFSET;
 	minPistonPosition = pistonPosition + PISTON_POSITION_PADDING;
-	maxPistonPosition = minPistonPosition + pistonStrokeLength - PISTON_POSITION_PADDING;
+	maxPistonPosition = minPistonPosition + pistonStrokeLength;
 
 	attachInterrupt(PISTON_POSITION_ENCODER_A_INTERRUPT, PistonPositionInterrupt, CHANGE);
 
@@ -663,29 +701,52 @@ void ZeroingPressureCallback() {
 }
 
 void CalibrateStroke() {
-	if (!PURead(IN_STOP_RAISED)) {
-		RelayWrite(OUT_RAISE_STOP, true);
-		RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
-		return;
+	if (pressureCallback == 0 && maximumPositionCallback == 0) {
+		UpdateDisplayRealStrokeLength();
+		if (PURead(IN_HOME)) {
+			if (homePressTime == -1) {
+				homePressTime = millis();
+			}
+		} else if (homePressTime != -1) {
+			homePressTime = -1;
+
+			initState = InitStateWaiting;
+			canReadRodSize = true;
+			canReadExtrudeLength = true;
+
+			positionMultiplicator = (float)pistonStrokeLength / ((float)realStrokeLength/(float)EXTRUDE_LENGTH_MULTIPLICATOR);
+			if (pistonStrokeLength != 0 && stopperSafePosition != 0) {
+				SaveSystemSettings();
+			}
+#ifdef DEBUG_SERIAL
+			Serial.print("Stroke Length: ");
+			Serial.print(pistonStrokeLength);
+			Serial.print("\n");
+			Serial.print("Piston Position Multiplicator: ");
+			Serial.print(positionMultiplicator);
+			Serial.print("\n");
+#endif
+		}
 	} else {
-		RelayWrite(OUT_RAISE_STOP, false);
-		RelayWrite(OUT_VALVE_FORWARD, true, OUT_VALVE_FORWARD_LED);
+		if (!PURead(IN_STOP_RAISED)) {
+			RelayWrite(OUT_RAISE_STOP, true);
+			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
+			return;
+		} else {
+			RelayWrite(OUT_RAISE_STOP, false);
+			RelayWrite(OUT_VALVE_FORWARD, true, OUT_VALVE_FORWARD_LED);
+		}
 	}
 }
 
-void CalibrateStrokePressureCallback() {
+void CalibrateStrokeCallback() {
 	if (PURead(IN_STOP_RAISED)) {
-		pistonStrokeLength = pistonPosition - minPistonPosition;
-
-		maxPistonPosition = minPistonPosition + pistonStrokeLength - PISTON_POSITION_PADDING;
-
-		initState = InitStateWaiting;
+		maxPistonPosition = pistonPosition;
+		pistonStrokeLength = maxPistonPosition - minPistonPosition;
 
 		pressureCallback = 0;
-
-		if (pistonStrokeLength != 0 && stopperSafePosition != 0) {
-			SaveSystemSettings();
-		}
+		maximumPositionCallback = 0;
+		attachInterrupt(CONFIG_ENCODER_A_INTERRUPT, UpdateStrokeLength, CHANGE);
 	}
 }
 
@@ -706,6 +767,12 @@ void CalibrateStopper() {
 		if (pistonStrokeLength != 0 && stopperSafePosition != 0) {
 			SaveSystemSettings();
 		}
+
+#ifdef DEBUG_SERIAL
+		Serial.print("Stopper Safe pos: ");
+		Serial.print(stopperSafePosition);
+		Serial.print("\n");
+#endif
 	}
 }
 
@@ -722,9 +789,6 @@ void CalibrateViceRaiseTime() {
 
 void ReadConfig() {
 	bool updateDisplay = false;
-
-	bool setSize = PURead(IN_SET_ROD_SIZE);
-	bool setLength = PURead(IN_SET_EXTRUDE_LENGTH);
 
 	UnitType setUnit = PURead(IN_UNIT_SELECTOR);
 
@@ -772,7 +836,7 @@ void LeaveModeInit() {
 
 void UpdatePositionManual() {
 	if (PURead(IN_MANUAL_PISTON_FORWARD) && PURead(IN_STOP_RAISED)) {
-		if (pistonPosition < maxPistonPosition) {
+		if (pistonPosition < maxPistonPosition && !PURead(IN_MAXIMUM_PISTON_POSITION)) {
 			RelayWrite(OUT_VALVE_FORWARD, true, OUT_VALVE_FORWARD_LED);
 			RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
 		} else {
@@ -805,23 +869,29 @@ void UpdatePositionManual() {
 void UpdateStopperManual() {
 	//	Check in safe zone to raise.
 	if (pistonPosition <= minPistonPosition + stopperSafePosition) {
-		bool inManualStopperIsDown = PURead(IN_MANUAL_TOGGLE_STOPPER);
-		if (inMaunalStopperWasDown && !inManualStopperIsDown) {
-			if (PURead(IN_STOP_LOWERED)) {
-				RelayWrite(OUT_LOWER_STOP, false);
-				RelayWrite(OUT_RAISE_STOP, true);
-				stopperToHigh = true;
-				stopperToLow = false;
-			} else if (PURead(IN_STOP_RAISED)) {
-				RelayWrite(OUT_LOWER_STOP, true);
-				RelayWrite(OUT_RAISE_STOP, false);
-				stopperToHigh = false;
-				stopperToLow = true;
+		if (PURead(IN_MANUAL_TOGGLE_STOPPER)) {
+			if (toggleStopperPressTime == -1) {
+				toggleStopperPressTime = millis();
 			}
+		} else {
+			if (millis() - NON_CRITICAL_INPUTS_HOLD_TIME > toggleStopperPressTime) {
+				if (PURead(IN_STOP_LOWERED)) {
+					RelayWrite(OUT_LOWER_STOP, false);
+					RelayWrite(OUT_RAISE_STOP, true);
+					stopperToHigh = true;
+					stopperToLow = false;
+				} else if (PURead(IN_STOP_RAISED)) {
+					RelayWrite(OUT_LOWER_STOP, true);
+					RelayWrite(OUT_RAISE_STOP, false);
+					stopperToHigh = false;
+					stopperToLow = true;
+				}
+			}
+
+			toggleStopperPressTime = -1;
 		}
-		inMaunalStopperWasDown = inManualStopperIsDown;
 	} else {
-		inMaunalStopperWasDown = false;
+		toggleStopperPressTime = -1;
 	}
 }
 
@@ -861,6 +931,8 @@ void UpdateViceManual() {
 	}
 }
 
+int prevPistonPosition = 0;
+
 void LoopManual() {
 	currentMessage = MessageConfigModeInitialized;
 
@@ -899,6 +971,26 @@ void LoopManual() {
 	}
 
 	UpdateDisplayComplete();
+
+	if (currentMessage == MessageConfigModeInitialized) {
+		if (prevRodSize != currentJobConfig.rodSize) {
+			prevRodSize = currentJobConfig.rodSize;
+			UpdateDisplayRodSize();
+		}
+
+		if (prevExtrudeLength != currentJobConfig.extrudeLength) {
+			prevExtrudeLength = currentJobConfig.extrudeLength;
+			UpdateDisplayExtureLength();
+		}
+
+		if (pistonPosition != prevPistonPosition) {
+			prevPistonPosition = pistonPosition;
+			lcd.setCursor(0, 1);
+			lcd.print("     ");
+			lcd.setCursor(0, 1);
+			lcd.print(pistonPosition);
+		}
+	}
 }
 
 void LeaveModeManual() {
@@ -1128,6 +1220,12 @@ bool MoveVice(bool destination) {
 	return false;
 }
 
+void MaximumPositionReached() {
+	pistonPosition = maxPistonPosition;
+
+	autoState = AutoStateMoveBackwardPostExtrude;
+}
+
 void LeaveModeAuto() {
 
 }
@@ -1142,7 +1240,7 @@ void PistonPositionInterrupt() {
 }
 
 void UpdateRodSizeInterrupt() {
-	if (digitalRead(CONFIG_ENCODER_A) == digitalRead(CONFIG_ENCODER_B)) {
+	if (digitalRead(CONFIG_ENCODER_A) != digitalRead(CONFIG_ENCODER_B)) {
 		currentJobConfig.rodSize = min(currentJobConfig.rodSize + 1, MAX_ROD_SIZE);
 	} else {
 		currentJobConfig.rodSize = max(currentJobConfig.rodSize - 1, MIN_ROD_SIZE);
@@ -1150,7 +1248,7 @@ void UpdateRodSizeInterrupt() {
 }
 
 void UpdateExtrudeLengthInterrupt() {
-	if (digitalRead(CONFIG_ENCODER_A) == digitalRead(CONFIG_ENCODER_B)) {
+	if (digitalRead(CONFIG_ENCODER_A) != digitalRead(CONFIG_ENCODER_B)) {
 		currentJobConfig.extrudeLength = min(currentJobConfig.extrudeLength + 1, MAX_EXTRUDE_LENGTH);
 	} else {
 		currentJobConfig.extrudeLength = max(currentJobConfig.extrudeLength - 1, MIN_EXTRUDE_LENGTH);
@@ -1158,10 +1256,18 @@ void UpdateExtrudeLengthInterrupt() {
 }
 
 void UpdateViceRaiseTimer() {
-	if (digitalRead(CONFIG_ENCODER_A) == digitalRead(CONFIG_ENCODER_B)) {
+	if (digitalRead(CONFIG_ENCODER_A) != digitalRead(CONFIG_ENCODER_B)) {
 		viceRaiseTimer = min(viceRaiseTimer + 1, VICE_RAISE_TIMER_MAX);
 	} else {
 		viceRaiseTimer = max(viceRaiseTimer - 1, VICE_RAISE_TIMER_MIN);
+	}
+}
+
+void UpdateStrokeLength() {
+	if (digitalRead(CONFIG_ENCODER_A) != digitalRead(CONFIG_ENCODER_B)) {
+		realStrokeLength ++;
+	} else {
+		realStrokeLength = max(realStrokeLength - 1, 1);
 	}
 }
 
@@ -1294,6 +1400,13 @@ void UpdateDisplayViceRaiseTime() {
 	lcd.print("   ");
 }
 
+void UpdateDisplayRealStrokeLength() {
+	//	"Real: "
+	lcd.setCursor(6, 1);
+	lcd.print((float)realStrokeLength/(float)EXTRUDE_LENGTH_MULTIPLICATOR);
+	lcd.print("   ");
+}
+
 void LoadEEPROM() {
 	eeprom_busy_wait();
 
@@ -1304,11 +1417,21 @@ void LoadEEPROM() {
 		//	System Settings.
 		int curAdd = EEPROM_VERSION_ADDRESS + sizeof(saveDataVersion);
 
+#ifdef DEBUG_SERIAL
+		Serial.print("Loading System settings from address: ");
+		Serial.print(curAdd);
+		Serial.print("\n");
+#endif
+
 		pistonStrokeLength = eeprom_read_word((unsigned int*)curAdd);
 		curAdd += sizeof(pistonStrokeLength);
+		
+		eeprom_read_block(&positionMultiplicator, (void*)curAdd, sizeof(positionMultiplicator));
+		curAdd += sizeof(positionMultiplicator);
+
 		stopperSafePosition = eeprom_read_word((unsigned int*)curAdd);
 
-		maxPistonPosition = minPistonPosition + pistonStrokeLength - PISTON_POSITION_PADDING;
+		maxPistonPosition = minPistonPosition + pistonStrokeLength;
 		curAdd += sizeof(stopperSafePosition);
 
 		viceRaiseTimer = eeprom_read_word((unsigned int*)curAdd);
@@ -1316,6 +1439,16 @@ void LoadEEPROM() {
 		curAdd += sizeof(viceRaiseTimer);
 
 #ifdef DEBUG_SERIAL
+		Serial.print("Piston Stroke Length: ");
+		Serial.print(pistonStrokeLength);
+		Serial.print("\n");
+		Serial.print("Position Multiplicator: ");
+		Serial.print(positionMultiplicator);
+		Serial.print("\n");
+		Serial.print("Vice Raise Timer: ");
+		Serial.print(viceRaiseTimer);
+		Serial.print("\n");
+		Serial.print("\n");
 		Serial.print("Reading JobConfig from address: ");
 		Serial.print(curAdd);
 		Serial.print("\n");
@@ -1404,11 +1537,22 @@ void SaveSystemSettings() {
 	}
 	
 	curAdd += sizeof(pistonStrokeLength);
+
+	float curPositionMultiplicator = 0;
+	eeprom_read_block(&curPositionMultiplicator, (void*)curAdd, sizeof(curPositionMultiplicator));
+
+	if (curPositionMultiplicator != positionMultiplicator) {
+		eeprom_write_block((void*)&positionMultiplicator, (void*)curAdd, sizeof(positionMultiplicator));
+	}
+
+	curAdd += sizeof(positionMultiplicator);
+
 	if (eeprom_read_word((unsigned int*)curAdd) != stopperSafePosition) {
 		eeprom_write_word((unsigned int*)curAdd, stopperSafePosition);
 	}
 
 	curAdd += sizeof(viceRaiseTimer);
+
 	if (eeprom_read_word((unsigned int*)curAdd) != viceRaiseTimer) {
 		eeprom_write_word((unsigned int*)curAdd, viceRaiseTimer);
 	}
@@ -1449,6 +1593,7 @@ int GetJobConfigEEPROMAddress() {
 	return EEPROM_VERSION_ADDRESS +
 	sizeof(saveDataVersion) +
 	sizeof(pistonStrokeLength) +
+	sizeof(positionMultiplicator) +
 	sizeof(stopperSafePosition) +
 	sizeof(viceRaiseTimer);
 }
