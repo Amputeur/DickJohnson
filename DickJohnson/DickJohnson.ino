@@ -27,7 +27,7 @@
 
 #define PISTON_POSITION_ZERO_OFFSET 10000
 #define PISTON_POSITION_PADDING 0.125f * positionMultiplicator
-#define PISTON_POSITION_DESTINATION_THRESHOLD 0.01f * positionMultiplicator
+#define PISTON_POSITION_DESTINATION_THRESHOLD 0.0f * positionMultiplicator
 
 #define VICE_RAISE_TIMER_MIN 100
 #define VICE_RAISE_TIMER_MAX 5000
@@ -475,24 +475,6 @@ void loop() {
 			}
 
 			if (currentRodSizeIndex >= 0 && currentRodSizeIndex < SIZE_COUNT) {
-				float len = 1.0f;
-				threadType = PURead(IN_THREAD_TYPE_SELECTOR);
-				if (threadType == THREAD_NC) {
-					len = extrusionTable[currentRodSizeIndex].ncExtrudeNeeded;
-				} else {
-					len = extrusionTable[currentRodSizeIndex].nfExtrudeNeeded;
-				}
-
-				float realLen = (float)currentJobConfig.extrudeLength/(float)EXTRUDE_LENGTH_MULTIPLICATOR;
-				autoModeStartPos = maxPistonPosition - (int)((realLen / (1.0f/len)) * (float)positionMultiplicator) - STOPPER_THICKNESS - (int)(0.375f * positionMultiplicator);
-				autoModeBackPos = maxPistonPosition - (int)(realLen * (float)positionMultiplicator) - STOPPER_THICKNESS - STOPPER_PADDING - (int)(0.375f * positionMultiplicator);
-				autoModeBackPos = min(minPistonPosition + stopperSafePosition, autoModeBackPos);
-				autoModeRaiseStopperPos = autoModeStartPos - STOPPER_PADDING;
-				autoModeRaiseStopperPos = min(minPistonPosition + stopperSafePosition, autoModeRaiseStopperPos);
-				autoModeExtrudePos = maxPistonPosition + 1000;
-				autoModeVicePressure = extrusionTable[currentRodSizeIndex].viceMaxPressure;
-				autoModeExtrudePressure = extrusionTable[currentRodSizeIndex].extrudeMaxPressure;
-
 				displayStats = false;
 				thisJobRodCount = 0;
 				autoModeHomeWasDown = false;
@@ -502,29 +484,8 @@ void loop() {
 					lastWaitTimes[i] = lastExtrudeTimes[i] = 0;
 				}
 
-				pressureCallback = 0;
+				pressureCallback = &AutoFirstRunHomePressureCallback;
 				maximumPositionCallback = &MaximumPositionReached;
-
-#ifdef DEBUG_SERIAL
-				Serial.print("autoModeStartPos: ");
-				Serial.print(((float)(maxPistonPosition - autoModeStartPos) / (float)positionMultiplicator));
-				Serial.print("\n");
-				Serial.print("autoModeBackPos: ");
-				Serial.print(((float)(maxPistonPosition - autoModeBackPos) / (float)positionMultiplicator));
-				Serial.print("\n");
-				Serial.print("autoModeRaiseStopperPos: ");
-				Serial.print(((float)(maxPistonPosition - autoModeRaiseStopperPos) / (float)positionMultiplicator));
-				Serial.print("\n");
-				Serial.print("autoModeExtrudePos: ");
-				Serial.print(((float)(maxPistonPosition - autoModeExtrudePos) / (float)positionMultiplicator));
-				Serial.print("\n");
-				Serial.print("autoModeVicePressure: ");
-				Serial.print(autoModeVicePressure);
-				Serial.print("\n");
-				Serial.print("autoModeExtrudePressure: ");
-				Serial.print(autoModeExtrudePressure);
-				Serial.print("\n");				
-#endif
 			} else {
 				//	TODO Error.
 			}
@@ -953,21 +914,8 @@ void LoopManual() {
 		UpdateStopperManual();
 		UpdateViceManual();
 	} else {
-		//	Only allow open vice.
-		if (PURead(IN_MANUAL_OPEN_VICE)) {
-			if (manualViceOpenPressTime == -1) {
-				manualViceOpenPressTime = millis();
-			} else {
-				if ((millis() - manualViceOpenPressTime) > NON_CRITICAL_INPUTS_HOLD_TIME) {
-					RelayWrite(OUT_VICE_OPEN, true, OUT_VICE_OPEN_LED);
-					RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
-				}
-			}
-		} else {
-			manualViceOpenPressTime = -1;
-			RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
-			RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
-		}
+		//	Only allow vice control.
+		UpdateViceManual();
 	}
 
 	UpdateDisplayComplete();
@@ -998,7 +946,7 @@ void LeaveModeManual() {
 }
 
 void LoopAuto() {
-	if (!initialized || pistonStrokeLength == 0 || stopperSafePosition == 0) {
+	if (pistonStrokeLength == 0 || stopperSafePosition == 0) {
 		currentMessage = MessageErrorSystemNotInitialized;
 		UpdateDisplayComplete();
 		return;
@@ -1018,9 +966,7 @@ void LoopAuto() {
 
 	switch (autoState) {
 	case AutoStateFirstRunGoHome:
-		if (GotoDestination(minPistonPosition, PISTON_POSITION_DESTINATION_THRESHOLD, HIGH)) {
-			autoState = AutoStateFirstRunLowerStopper;
-		}
+		RelayWrite(OUT_VALVE_BACKWARD, true, OUT_VALVE_BACKWARD_LED);
 		break;
 	case AutoStateFirstRunLowerStopper:
 		if (MoveStopper(LOW)) {
@@ -1218,6 +1164,64 @@ bool MoveVice(bool destination) {
 	}
 
 	return false;
+}
+
+void AutoFirstRunHomePressureCallback() {
+	autoState = AutoStateFirstRunLowerStopper;
+	pressureCallback = 0;
+
+	if (!initialized) {
+		initialized = true;
+		attachInterrupt(PISTON_POSITION_ENCODER_A_INTERRUPT, PistonPositionInterrupt, CHANGE);
+	}
+
+	pistonPosition = PISTON_POSITION_ZERO_OFFSET;
+	minPistonPosition = pistonPosition + PISTON_POSITION_PADDING;
+	maxPistonPosition = minPistonPosition + pistonStrokeLength;
+
+	RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
+
+	float len = 1.0f;
+	threadType = PURead(IN_THREAD_TYPE_SELECTOR);
+	if (threadType == THREAD_NC) {
+		len = extrusionTable[currentRodSizeIndex].ncExtrudeNeeded;
+	} else {
+		len = extrusionTable[currentRodSizeIndex].nfExtrudeNeeded;
+	}
+
+	float realLen = (float)currentJobConfig.extrudeLength/(float)EXTRUDE_LENGTH_MULTIPLICATOR;
+	autoModeStartPos = maxPistonPosition - (int)((realLen / (1.0f/len)) * (float)positionMultiplicator) - STOPPER_THICKNESS - (int)(0.375f * positionMultiplicator);
+	autoModeBackPos = maxPistonPosition - (int)(realLen * (float)positionMultiplicator) - STOPPER_THICKNESS - STOPPER_PADDING - (int)(0.375f * positionMultiplicator);
+	autoModeBackPos = min(minPistonPosition + stopperSafePosition, autoModeBackPos);
+	autoModeRaiseStopperPos = autoModeStartPos - STOPPER_PADDING;
+	autoModeRaiseStopperPos = min(minPistonPosition + stopperSafePosition, autoModeRaiseStopperPos);
+	autoModeExtrudePos = maxPistonPosition + 1000;
+	autoModeVicePressure = extrusionTable[currentRodSizeIndex].viceMaxPressure;
+	autoModeExtrudePressure = extrusionTable[currentRodSizeIndex].extrudeMaxPressure;
+
+#ifdef DEBUG_SERIAL
+	Serial.print("Current Position: ");
+	Serial.print(((float)(maxPistonPosition - pistonPosition) / (float)positionMultiplicator));
+	Serial.print("\n");
+	Serial.print("autoModeStartPos: ");
+	Serial.print(((float)(maxPistonPosition - autoModeStartPos) / (float)positionMultiplicator));
+	Serial.print("\n");
+	Serial.print("autoModeBackPos: ");
+	Serial.print(((float)(maxPistonPosition - autoModeBackPos) / (float)positionMultiplicator));
+	Serial.print("\n");
+	Serial.print("autoModeRaiseStopperPos: ");
+	Serial.print(((float)(maxPistonPosition - autoModeRaiseStopperPos) / (float)positionMultiplicator));
+	Serial.print("\n");
+	Serial.print("autoModeExtrudePos: ");
+	Serial.print(((float)(maxPistonPosition - autoModeExtrudePos) / (float)positionMultiplicator));
+	Serial.print("\n");
+	Serial.print("autoModeVicePressure: ");
+	Serial.print(autoModeVicePressure);
+	Serial.print("\n");
+	Serial.print("autoModeExtrudePressure: ");
+	Serial.print(autoModeExtrudePressure);
+	Serial.print("\n");
+#endif
 }
 
 void MaximumPositionReached() {
