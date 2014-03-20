@@ -27,10 +27,12 @@
 
 #define PISTON_POSITION_ZERO_OFFSET 10000
 #define PISTON_POSITION_PADDING 0.125f * positionMultiplicator
-#define PISTON_POSITION_DESTINATION_THRESHOLD 0.0f * positionMultiplicator
 
 #define VICE_RAISE_TIMER_MIN 100
 #define VICE_RAISE_TIMER_MAX 5000
+
+#define LEARNING_COUNT 5
+#define LEARNING_DELAY 100ul
 
 #define THREAD_NC true
 #define THREAD_NF false
@@ -248,6 +250,8 @@ enum AutoState {
 	AutoStateFirstRunGoHome,
 	AutoStateFirstRunLowerStopper,
 	AutoStateFirstRunOpenVice,
+	AutoStateFirstRunCalibrateForwardOvershoot,
+	AutoStateFirstRunCalibrateForwardOvershootWait,
 	AutoStateFirstRunGotoStartPos,
 	AutoStateStartOil,
 	AutoStateWaitPedal,
@@ -284,6 +288,25 @@ unsigned long refWaitTime = 0;
 unsigned long refExtrudeTime = 0;
 
 bool predalWasReleased = false;
+
+bool isLearning = false;
+int learningDirection = 0;
+unsigned int learningTargetPosition = 0;
+unsigned int learningPrevPistonPosition = 0;
+
+int learningBackwardValues[LEARNING_COUNT] = {-1};
+unsigned int learningBackwardValuesCount = 0;
+int learningForwardValues[LEARNING_COUNT] = {-1};
+unsigned int learningForwardValuesCount = 0;
+unsigned long learningTargetTime = 0ul;
+
+unsigned int forwardOvershoot = 0;
+unsigned int backwardOvershoot = 0;
+
+#ifdef DEBUG_SERIAL
+unsigned long nextPistonPositionLogTime = 0;
+unsigned int logPrevPistonPosition = 0;
+#endif
 
 void setup() {
 	SetupPin(OUT_RELAY_ACTIVATOR, false);
@@ -354,6 +377,18 @@ void setup() {
 }
 
 void loop() {
+#ifdef DEBUG_SERIAL
+	if (millis() > nextPistonPositionLogTime) {
+		nextPistonPositionLogTime = millis() + 1000;
+
+		if (pistonPosition != logPrevPistonPosition) {
+			logPrevPistonPosition = pistonPosition;
+			Serial.print("Current Piston Position: ");
+			Serial.print(pistonPosition);
+			Serial.print("\n");
+		}
+	}
+#endif
 	bool newPanic = PURead(IN_PANIC);
 
 	if (newPanic != isPanicked) {
@@ -416,6 +451,8 @@ void loop() {
 		RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
 	}
 
+	Learn();
+
 	if (PURead(IN_MAXIMUM_PISTON_POSITION)) {
 		if (maximumPositionCallback != 0) {
 			maximumPositionCallback();
@@ -470,6 +507,7 @@ void loop() {
 			StateChangeCleanup(true);
 			currentMode = ModeAuto;
 			autoState = AutoStateFirstRunGoHome;
+			isLearning = false;
 
 			if (canReadRodSize || canReadExtrudeLength) {
 				detachInterrupt(CONFIG_ENCODER_A_INTERRUPT);
@@ -981,11 +1019,21 @@ void LoopAuto() {
 		break;
 	case AutoStateFirstRunOpenVice:
 		if (MoveVice(HIGH)) {
+			autoState = AutoStateFirstRunCalibrateForwardOvershoot;
+		}
+		break;
+	case AutoStateFirstRunCalibrateForwardOvershoot:
+		if (GotoDestination((int)((float)(autoModeStartPos - minPistonPosition) * 0.5f) + minPistonPosition, LOW)) {
+			autoState = AutoStateFirstRunCalibrateForwardOvershootWait;
+		}
+		break;
+	case AutoStateFirstRunCalibrateForwardOvershootWait:
+		if (!isLearning) {
 			autoState = AutoStateFirstRunGotoStartPos;
 		}
 		break;
 	case AutoStateFirstRunGotoStartPos:
-		if (GotoDestination(autoModeStartPos, PISTON_POSITION_DESTINATION_THRESHOLD, LOW)) {
+		if (GotoDestination(autoModeStartPos, LOW)) {
 			autoState = AutoStateStartOil;
 			refExtrudeTime = refWaitTime = millis();
 		}
@@ -1015,7 +1063,7 @@ void LoopAuto() {
 		}
 		break;
 	case AutoStateMoveBackwardForStopper:
-		if (GotoDestination(autoModeRaiseStopperPos, PISTON_POSITION_DESTINATION_THRESHOLD, HIGH)) {
+		if (GotoDestination(autoModeRaiseStopperPos, HIGH)) {
 			autoState = AutoStateStopOil;
 		}
 		break;
@@ -1029,7 +1077,7 @@ void LoopAuto() {
 		}
 		break;
 	case AutoStateMoveForwardExtrude:
-		if (GotoDestination(autoModeExtrudePos, PISTON_POSITION_DESTINATION_THRESHOLD, LOW)) {
+		if (GotoDestination(autoModeExtrudePos, LOW)) {
 			autoState = AutoStateMoveBackwardPostExtrude;
 		} else {
 			if (currentPressure > autoModeExtrudePressure) {
@@ -1043,7 +1091,7 @@ void LoopAuto() {
 		}
 		break;
 	case AutoStateMoveBackwardPostExtrude:
-		if (GotoDestination(autoModeBackPos, PISTON_POSITION_DESTINATION_THRESHOLD, HIGH)) {
+		if (GotoDestination(autoModeBackPos, HIGH)) {
 			autoState = AutoStateLowerStopper;
 		}
 		break;
@@ -1060,7 +1108,7 @@ void LoopAuto() {
 		}
 		break;
 	case AutoStateMoveForwardToStartPos:
-		if (GotoDestination(autoModeStartPos, PISTON_POSITION_DESTINATION_THRESHOLD, LOW)) {
+		if (GotoDestination(autoModeStartPos, LOW)) {
 			autoState = AutoStateStartOil;
 
 			unsigned long curMillis = millis();
@@ -1102,20 +1150,111 @@ void LoopAuto() {
 	}
 }
 
-bool GotoDestination(int destination, int threshold, bool continueIf) {
+void Learn() {
+	if (isLearning && currentMode == ModeAuto) {
+		//	Check if pistonPosition stabilized for a while...
+		if (pistonPosition == learningPrevPistonPosition) {
+			if (millis() > learningTargetTime) {
+				isLearning = false;
+
+				int delta = learningTargetPosition - pistonPosition;
+
+				if (learningDirection == -1) {
+					//	Backward
+					learningBackwardValues[learningBackwardValuesCount%LEARNING_COUNT] = delta + backwardOvershoot;
+					learningBackwardValuesCount++;
+
+					unsigned int total = 0;
+					byte learnedCount = 0;
+					for (int i=0; i<LEARNING_COUNT; i++) {
+						if (i < learningBackwardValuesCount) {
+							learnedCount++;
+							total += learningBackwardValues[i];
+						}
+					}
+
+					if (learnedCount > 0) {
+						backwardOvershoot = (int)((float)total / (float)learnedCount);
+#ifdef DEBUG_SERIAL
+						Serial.print("backwardOvershoot average: ");
+						Serial.print(backwardOvershoot);
+						Serial.print("\n");
+#endif
+					}
+				} else if (learningDirection == 1) {
+					//	Forward
+					delta *= -1;
+
+					learningForwardValues[learningForwardValuesCount%LEARNING_COUNT] = delta + forwardOvershoot;
+					learningForwardValuesCount++;
+
+					unsigned int total = 0;
+					byte learnedCount = 0;
+					for (int i=0; i<LEARNING_COUNT; i++) {
+						if (i < learningForwardValuesCount) {
+							learnedCount++;
+							total += learningForwardValues[i];
+
+							Serial.print(learningForwardValues[i]);
+							Serial.print("\n");
+						}
+					}
+
+					if (learnedCount > 0) {
+						forwardOvershoot = (int)((float)total / (float)learnedCount);
+#ifdef DEBUG_SERIAL
+						Serial.print("forwardOvershoot average: ");
+						Serial.print(forwardOvershoot);
+						Serial.print("\n");
+#endif
+					}
+				}
+			}
+		} else {
+			learningPrevPistonPosition = pistonPosition;
+			learningTargetTime = millis() + LEARNING_DELAY;
+		}
+	}
+}
+
+bool GotoDestination(int destination, bool continueIf) {
 	if (continueIf == HIGH) {
-		if (pistonPosition <= (destination + threshold)) {
+		if (pistonPosition <= (destination + backwardOvershoot)) {
 			RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
 			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
+
+#ifdef DEBUG_SERIAL
+			Serial.print("GotoDestination reached target: ");
+			Serial.print((destination));
+			Serial.print(" -- The current pistonPosition is: ");
+			Serial.print(pistonPosition);
+			Serial.print("\n");
+#endif
+			isLearning = true;
+			learningTargetTime = millis() + LEARNING_DELAY;
+			learningDirection = -1;
+			learningTargetPosition = destination;
 			return true;
 		} else {
 			RelayWrite(OUT_VALVE_BACKWARD, true, OUT_VALVE_BACKWARD_LED);
 			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
 		}
 	} else {
-		if (pistonPosition >= (destination - threshold)) {
+		if (pistonPosition >= (destination - forwardOvershoot)) {
 			RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
 			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
+
+#ifdef DEBUG_SERIAL
+			Serial.print("GotoDestination reached target: ");
+			Serial.print((destination));
+			Serial.print(" -- The current pistonPosition is: ");
+			Serial.print(pistonPosition);
+			Serial.print("\n");
+#endif
+			isLearning = true;
+			learningTargetTime = millis() + LEARNING_DELAY;
+			learningDirection = 1;
+			learningTargetPosition = destination;
 			return true;
 		} else {
 			RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
@@ -1123,6 +1262,7 @@ bool GotoDestination(int destination, int threshold, bool continueIf) {
 		}
 	}
 
+	isLearning = false;
 	return false;
 }
 
@@ -1432,7 +1572,7 @@ void UpdateDisplayResultingLength() {
 		len = extrusionTable[currentRodSizeIndex].nfExtrudeNeeded;
 	}
 
-	float fLength = (float)(maxPistonPosition - pistonPosition) / positionMultiplicator;
+	float fLength = (float)(maxPistonPosition - pistonPosition - STOPPER_THICKNESS - (int)(0.375f * positionMultiplicator)) / positionMultiplicator;
 	fLength = fLength / len;
 
 	if (unitType == UNIT_MM) {
