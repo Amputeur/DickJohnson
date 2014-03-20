@@ -19,7 +19,7 @@
 #define EXTRUDE_LENGTH_MULTIPLICATOR 1250
 
 #define STOPPER_THICKNESS 0.375f * positionMultiplicator
-#define STOPPER_PADDING 0.25f * positionMultiplicator
+#define STOPPER_PADDING 0.125f * positionMultiplicator
 
 #define MAX_PRESSURE 512
 #define RECALIBRATE_HOLD_TIME 2500l
@@ -282,6 +282,8 @@ unsigned long lastWaitTimes[STATS_AVERAGE_TIME_SAMPLING_COUNT] = {0ul};
 unsigned int currentSamplingIndex = 0;
 unsigned long refWaitTime = 0;
 unsigned long refExtrudeTime = 0;
+
+bool predalWasReleased = false;
 
 void setup() {
 	SetupPin(OUT_RELAY_ACTIVATOR, false);
@@ -931,12 +933,14 @@ void LoopManual() {
 			UpdateDisplayExtureLength();
 		}
 
-		if (pistonPosition != prevPistonPosition) {
-			prevPistonPosition = pistonPosition;
-			lcd.setCursor(0, 1);
-			lcd.print("     ");
-			lcd.setCursor(0, 1);
-			lcd.print(pistonPosition);
+		bool prevUnitType = unitType;
+		unitType = PURead(IN_UNIT_SELECTOR);
+
+		bool prevThreadType = threadType;
+		threadType = PURead(IN_THREAD_TYPE_SELECTOR);
+
+		if (pistonPosition != prevPistonPosition || threadType != prevThreadType || unitType != prevUnitType) {
+			UpdateDisplayResultingLength();
 		}
 	}
 }
@@ -989,14 +993,20 @@ void LoopAuto() {
 	case AutoStateStartOil:
 		RelayWrite(OUT_DROP_OIL, true);
 		autoState = AutoStateWaitPedal;
+
+		predalWasReleased = !PURead(IN_PEDAL);
 		break;
 	case AutoStateWaitPedal:
 		if (PURead(IN_PEDAL)) {
-			autoState = AutoStateClosingVice;
-			lastWaitTimes[currentSamplingIndex] = millis() - refWaitTime;
-			if (displayStats) {
-				UpdateDisplayStats();
+			if (predalWasReleased) {
+				autoState = AutoStateClosingVice;
+				lastWaitTimes[currentSamplingIndex] = millis() - refWaitTime;
+				if (displayStats) {
+					UpdateDisplayStats();
+				}
 			}
+		} else {
+			predalWasReleased = true;
 		}
 		break;
 	case AutoStateClosingVice:
@@ -1409,6 +1419,31 @@ void UpdateDisplayRealStrokeLength() {
 	lcd.setCursor(6, 1);
 	lcd.print((float)realStrokeLength/(float)EXTRUDE_LENGTH_MULTIPLICATOR);
 	lcd.print("   ");
+}
+
+void UpdateDisplayResultingLength() {
+	prevPistonPosition = pistonPosition;
+	lcd.setCursor(0, 1);
+
+	float len = 1.0f;
+	if (threadType == THREAD_NC) {
+		len = extrusionTable[currentRodSizeIndex].ncExtrudeNeeded;
+	} else {
+		len = extrusionTable[currentRodSizeIndex].nfExtrudeNeeded;
+	}
+
+	float fLength = (float)(maxPistonPosition - pistonPosition) / positionMultiplicator;
+	fLength = fLength / len;
+
+	if (unitType == UNIT_MM) {
+		fLength *= 25.4f;
+		lcd.print((int)fLength);
+		lcd.print("mm");
+	} else {
+		lcd.print(fLength);
+	}
+
+	lcd.print("      ");
 }
 
 void LoadEEPROM() {
