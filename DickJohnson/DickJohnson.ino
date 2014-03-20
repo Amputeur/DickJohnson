@@ -21,7 +21,7 @@
 #define STOPPER_THICKNESS 0.375f * positionMultiplicator
 #define STOPPER_PADDING 0.125f * positionMultiplicator
 
-#define MAX_PRESSURE 512
+#define MAX_PRESSURE 400
 #define RECALIBRATE_HOLD_TIME 2500l
 #define NON_CRITICAL_INPUTS_HOLD_TIME 250l
 
@@ -33,6 +33,8 @@
 
 #define LEARNING_COUNT 5
 #define LEARNING_DELAY 100ul
+
+#define COUP_BELIER_DELAY 90
 
 #define THREAD_NC true
 #define THREAD_NF false
@@ -166,6 +168,8 @@ struct RodSizeParams {
 	float size;
 	float ncExtrudeNeeded;
 	float nfExtrudeNeeded;
+	float dieEntryNC;
+	float dieEntryNF;
 	int viceMaxPressure;
 	int extrudeMaxPressure;
 	String name;
@@ -173,18 +177,18 @@ struct RodSizeParams {
 
 #define SIZE_COUNT 11
 RodSizeParams extrusionTable[SIZE_COUNT] = {
-//	 Size		NC			NF			viceP	extrudeP	Name
-	{0.25f,		0.7355f,	0.8035f,	255,	255,		"  1/4"},
-	{0.3125f,	0.7626,		0.8161f,	255,	255,		" 5/16"},
-	{0.375,		0.7772f,	0.8454f,	255,	255,		"  3/8"},
-	{0.4375f,	0.7829f,	0.8409f,	255,	255,		" 7/16"},
-	{0.5f,		0.7950f,	0.8601f,	255,	255,		"  1/2"},
-	{0.625f,	0.8068f,	0.8761f,	255,	255,		"  5/8"},
-	{0.75f,		0.8218f,	0.8841f,	255,	255,		"  3/4"},
-	{0.875f,	0.8301f,	0.8868f,	255,	255,		"  7/8"},
-	{1.0f,		0.8338f,	0.8851f,	255,	255,		"1    "},
-	{1.125f,	0.8321f,	0.8974f,	255,	255,		"1 1/8"},
-	{1.25f,		0.8479f,	0.9072f,	255,	255,		"1 1/4"}
+//	 Size		NC			NF			DieEntryNC	DieEntryNF	viceP	extrudeP	Name
+	{0.25f,		0.7355f,	0.8035f,	0.375f,		0.375f,		128,	255,		"  1/4"},
+	{0.3125f,	0.7626f,	0.8161f,	0.375f,		0.375f,		150,	255,		" 5/16"},
+	{0.375f,	0.7772f,	0.8454f,	0.375f,		0.375f,		175,	255,		"  3/8"},
+	{0.4375f,	0.7829f,	0.8409f,	0.375f,		0.375f,		200,	255,		" 7/16"},
+	{0.5f,		0.7950f,	0.8601f,	0.375f,		0.375f,		220,	512,		"  1/2"},
+	{0.625f,	0.8068f,	0.8761f,	0.375f,		0.375f,		300,	255,		"  5/8"},
+	{0.75f,		0.8218f,	0.8841f,	0.375f,		0.375f,		350,	255,		"  3/4"},
+	{0.875f,	0.8301f,	0.8868f,	0.375f,		0.375f,		255,	255,		"  7/8"},
+	{1.0f,		0.8338f,	0.8851f,	0.375f,		0.375f,		255,	255,		"1    "},
+	{1.125f,	0.8321f,	0.8974f,	0.375f,		0.375f,		255,	255,		"1 1/8"},
+	{1.25f,		0.8479f,	0.9072f,	0.375f,		0.375f,		255,	255,		"1 1/4"}
 };
 
 LiquidCrystal lcd(8, 9, 10, 11, 12, 7);
@@ -302,6 +306,8 @@ unsigned long learningTargetTime = 0ul;
 
 unsigned int forwardOvershoot = 0;
 unsigned int backwardOvershoot = 0;
+
+unsigned long ignorePressureTime = 0;
 
 #ifdef DEBUG_SERIAL
 unsigned long nextPistonPositionLogTime = 0;
@@ -440,15 +446,21 @@ void loop() {
 	digitalWrite(OUT_STOPPER_RAISED_LED, PURead(IN_STOP_RAISED));
 	RelayWrite(OUT_COOLANT, PURead(IN_COOLANT), OUT_COOLANT_LED);
 
-	currentPressure = analogRead(IN_ANALOG_PRESSURE);
+	if (ignorePressureTime < millis()) {
+		currentPressure = analogRead(IN_ANALOG_PRESSURE);
+	} else {
+		currentPressure = 0;
+	}
+
 	if (currentPressure >= MAX_PRESSURE) {
 		if (pressureCallback != 0) {
 			pressureCallback();
+		} else {
+			RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
+			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
+			RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
+			RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
 		}
-		RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
-		RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
-		RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
-		RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
 	}
 
 	Learn();
@@ -654,7 +666,10 @@ void InitWaitInput() {
 			initState = InitStateZeroing;
 			pressureCallback = &ZeroingPressureCallback;
 			maximumPositionCallback = 0;
-			RelayWrite(OUT_VALVE_BACKWARD, true, OUT_VALVE_BACKWARD_LED);
+			if (!PURead(OUT_VALVE_BACKWARD)) {
+				RelayWrite(OUT_VALVE_BACKWARD, true, OUT_VALVE_BACKWARD_LED);
+				ignorePressureTime = millis() + COUP_BELIER_DELAY;
+			}
 			initModeHomeCount = 1;
 		} else {
 			switch (initModeHomeCount) {
@@ -696,6 +711,8 @@ void ZeroingPressureCallback() {
 	minPistonPosition = pistonPosition + PISTON_POSITION_PADDING;
 	maxPistonPosition = minPistonPosition + pistonStrokeLength;
 
+	RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
+
 	attachInterrupt(PISTON_POSITION_ENCODER_A_INTERRUPT, PistonPositionInterrupt, CHANGE);
 
 	pressureCallback = 0;
@@ -735,7 +752,10 @@ void CalibrateStroke() {
 			return;
 		} else {
 			RelayWrite(OUT_RAISE_STOP, false);
-			RelayWrite(OUT_VALVE_FORWARD, true, OUT_VALVE_FORWARD_LED);
+			if (!PURead(OUT_VALVE_FORWARD)) {
+				RelayWrite(OUT_VALVE_FORWARD, true, OUT_VALVE_FORWARD_LED);
+				ignorePressureTime = millis() + COUP_BELIER_DELAY;
+			}
 		}
 	}
 }
@@ -838,7 +858,10 @@ void LeaveModeInit() {
 void UpdatePositionManual() {
 	if (PURead(IN_MANUAL_PISTON_FORWARD) && PURead(IN_STOP_RAISED)) {
 		if (pistonPosition < maxPistonPosition && !PURead(IN_MAXIMUM_PISTON_POSITION)) {
-			RelayWrite(OUT_VALVE_FORWARD, true, OUT_VALVE_FORWARD_LED);
+			if (!PURead(OUT_VALVE_FORWARD)) {
+				RelayWrite(OUT_VALVE_FORWARD, true, OUT_VALVE_FORWARD_LED);
+				ignorePressureTime = millis() + COUP_BELIER_DELAY;
+			}
 			RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
 		} else {
 			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
@@ -848,7 +871,10 @@ void UpdatePositionManual() {
 	} else if (PURead(IN_MANUAL_PISTON_BACKWARD)) {
 		if (pistonPosition > minPistonPosition) {
 			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
-			RelayWrite(OUT_VALVE_BACKWARD, true, OUT_VALVE_BACKWARD_LED);
+			if (!PURead(OUT_VALVE_BACKWARD)) {
+				RelayWrite(OUT_VALVE_BACKWARD, true, OUT_VALVE_BACKWARD_LED);
+				ignorePressureTime = millis() + COUP_BELIER_DELAY;
+			}
 		} else {
 			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
 			RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
@@ -917,15 +943,21 @@ void UpdateViceManual() {
 	}
 
 	if (open && (millis() - manualViceOpenPressTime) > NON_CRITICAL_INPUTS_HOLD_TIME) {
-		RelayWrite(OUT_VICE_OPEN, true, OUT_VICE_OPEN_LED);
+		if (!PURead(OUT_VICE_OPEN)) {
+			RelayWrite(OUT_VICE_OPEN, true, OUT_VICE_OPEN_LED);
+			ignorePressureTime = millis() + COUP_BELIER_DELAY;
+		}
 		RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
-	} else if ((close && (millis() - manualViceClosePressTime) > NON_CRITICAL_INPUTS_HOLD_TIME)
-			|| PURead(IN_PEDAL)
+	} else if (((close && (millis() - manualViceClosePressTime) > NON_CRITICAL_INPUTS_HOLD_TIME)
+			|| PURead(IN_PEDAL))
 			&& currentRodSizeIndex >= 0
 			&& currentPressure <= extrusionTable[currentRodSizeIndex].viceMaxPressure) {
 
 		RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
-		RelayWrite(OUT_VICE_CLOSE, true, OUT_VICE_CLOSE_LED);
+		if (!PURead(OUT_VICE_CLOSE)) {
+			RelayWrite(OUT_VICE_CLOSE, true, OUT_VICE_CLOSE_LED);
+			ignorePressureTime = millis() + COUP_BELIER_DELAY;
+		}
 	} else {
 		RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
 		RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
@@ -1001,14 +1033,17 @@ void LoopAuto() {
 		return;
 	}
 
-	if (currentPressure >= MAX_PRESSURE) {
+	/*if (currentPressure >= MAX_PRESSURE) {
 		//	TODO Error Message.
 		return;
-	}
+	}*/
 
 	switch (autoState) {
 	case AutoStateFirstRunGoHome:
-		RelayWrite(OUT_VALVE_BACKWARD, true, OUT_VALVE_BACKWARD_LED);
+		if (!PURead(OUT_VALVE_BACKWARD)) {
+			RelayWrite(OUT_VALVE_BACKWARD, true, OUT_VALVE_BACKWARD_LED);
+			ignorePressureTime = millis() + COUP_BELIER_DELAY;
+		}
 		break;
 	case AutoStateFirstRunLowerStopper:
 		if (MoveStopper(LOW)) {
@@ -1236,7 +1271,10 @@ bool GotoDestination(int destination, bool continueIf) {
 			learningTargetPosition = destination;
 			return true;
 		} else {
-			RelayWrite(OUT_VALVE_BACKWARD, true, OUT_VALVE_BACKWARD_LED);
+			if (!PURead(OUT_VALVE_BACKWARD)) {
+				RelayWrite(OUT_VALVE_BACKWARD, true, OUT_VALVE_BACKWARD_LED);
+				ignorePressureTime = millis() + COUP_BELIER_DELAY;
+			}
 			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
 		}
 	} else {
@@ -1258,7 +1296,10 @@ bool GotoDestination(int destination, bool continueIf) {
 			return true;
 		} else {
 			RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
-			RelayWrite(OUT_VALVE_FORWARD, true, OUT_VALVE_FORWARD_LED);
+			if (!PURead(OUT_VALVE_FORWARD)) {
+				RelayWrite(OUT_VALVE_FORWARD, true, OUT_VALVE_FORWARD_LED);
+				ignorePressureTime = millis() + COUP_BELIER_DELAY;
+			}
 		}
 	}
 
@@ -1300,7 +1341,10 @@ bool MoveVice(bool destination) {
 			return true;
 		} else {
 			RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
-			RelayWrite(OUT_VICE_OPEN, true, OUT_VICE_OPEN_LED);
+			if (!PURead(OUT_VICE_OPEN)) {
+				RelayWrite(OUT_VICE_OPEN, true, OUT_VICE_OPEN_LED);
+				ignorePressureTime = millis() + COUP_BELIER_DELAY;
+			}
 		}
 	} else {
 		if (currentPressure >= autoModeVicePressure) {
@@ -1308,7 +1352,10 @@ bool MoveVice(bool destination) {
 			RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
 			return true;
 		} else {
-			RelayWrite(OUT_VICE_CLOSE, true, OUT_VICE_CLOSE_LED);
+			if (!PURead(OUT_VICE_CLOSE)) {
+				RelayWrite(OUT_VICE_CLOSE, true, OUT_VICE_CLOSE_LED);
+				ignorePressureTime = millis() + COUP_BELIER_DELAY;
+			}
 			RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
 		}
 	}
@@ -1333,15 +1380,18 @@ void AutoFirstRunHomePressureCallback() {
 
 	float len = 1.0f;
 	threadType = PURead(IN_THREAD_TYPE_SELECTOR);
+	float dieEntry = 0.0f;
 	if (threadType == THREAD_NC) {
 		len = extrusionTable[currentRodSizeIndex].ncExtrudeNeeded;
+		dieEntry = extrusionTable[currentRodSizeIndex].dieEntryNC;
 	} else {
 		len = extrusionTable[currentRodSizeIndex].nfExtrudeNeeded;
+		dieEntry = extrusionTable[currentRodSizeIndex].dieEntryNF;
 	}
 
 	float realLen = (float)currentJobConfig.extrudeLength/(float)EXTRUDE_LENGTH_MULTIPLICATOR;
-	autoModeStartPos = maxPistonPosition - (int)((realLen / (1.0f/len)) * (float)positionMultiplicator) - STOPPER_THICKNESS - (int)(0.375f * positionMultiplicator);
-	autoModeBackPos = maxPistonPosition - (int)(realLen * (float)positionMultiplicator) - STOPPER_THICKNESS - STOPPER_PADDING - (int)(0.375f * positionMultiplicator);
+	autoModeStartPos = maxPistonPosition - (int)((realLen / (1.0f/len)) * (float)positionMultiplicator) - STOPPER_THICKNESS - (int)(dieEntry * positionMultiplicator);
+	autoModeBackPos = maxPistonPosition - (int)(realLen * (float)positionMultiplicator) - STOPPER_THICKNESS - STOPPER_PADDING - (int)(dieEntry * positionMultiplicator);
 	autoModeBackPos = min(minPistonPosition + stopperSafePosition, autoModeBackPos);
 	autoModeRaiseStopperPos = autoModeStartPos - STOPPER_PADDING;
 	autoModeRaiseStopperPos = min(minPistonPosition + stopperSafePosition, autoModeRaiseStopperPos);
@@ -1566,13 +1616,16 @@ void UpdateDisplayResultingLength() {
 	lcd.setCursor(0, 1);
 
 	float len = 1.0f;
+	float dieEntry = 1.0f;
 	if (threadType == THREAD_NC) {
 		len = extrusionTable[currentRodSizeIndex].ncExtrudeNeeded;
+		dieEntry = extrusionTable[currentRodSizeIndex].dieEntryNC;
 	} else {
 		len = extrusionTable[currentRodSizeIndex].nfExtrudeNeeded;
+		dieEntry = extrusionTable[currentRodSizeIndex].dieEntryNF;
 	}
 
-	float fLength = (float)(maxPistonPosition - pistonPosition - STOPPER_THICKNESS - (int)(0.375f * positionMultiplicator)) / positionMultiplicator;
+	float fLength = (float)(maxPistonPosition - pistonPosition - STOPPER_THICKNESS - (int)(dieEntry * positionMultiplicator)) / positionMultiplicator;
 	fLength = fLength / len;
 
 	if (unitType == UNIT_MM) {
