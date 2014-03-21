@@ -3,6 +3,7 @@
 
 #define DEBUG_SERIAL
 //#define ENABLE_SAVE_TO_EEPROM
+#define EXTERNAL_PUMP
 
 #define SAVE_DATA_VERSION 3
 #define EEPROM_VERSION_ADDRESS 0
@@ -185,17 +186,17 @@ struct RodSizeParams {
 #define SIZE_COUNT 11
 RodSizeParams extrusionTable[SIZE_COUNT] = {
 //	 Size		NC			NF			DieEntryNC	DieEntryNF	viceP	extrudeP	Name
-	{0.25f,		0.7355f,	0.8035f,	0.375f,		0.375f,		128,	255,		"  1/4"},
-	{0.3125f,	0.7626f,	0.8161f,	0.375f,		0.375f,		150,	255,		" 5/16"},
-	{0.375f,	0.7772f,	0.8454f,	0.375f,		0.375f,		175,	255,		"  3/8"},
-	{0.4375f,	0.7829f,	0.8409f,	0.375f,		0.375f,		200,	255,		" 7/16"},
-	{0.5f,		0.7950f,	0.8601f,	0.375f,		0.375f,		300,	512,		"  1/2"},
-	{0.625f,	0.8068f,	0.8761f,	0.375f,		0.375f,		300,	255,		"  5/8"},
-	{0.75f,		0.8218f,	0.8841f,	0.375f,		0.375f,		350,	255,		"  3/4"},
-	{0.875f,	0.8301f,	0.8868f,	0.375f,		0.375f,		255,	255,		"  7/8"},
-	{1.0f,		0.8338f,	0.8851f,	0.375f,		0.375f,		255,	255,		"1    "},
-	{1.125f,	0.8321f,	0.8974f,	0.375f,		0.375f,		255,	255,		"1 1/8"},
-	{1.25f,		0.8479f,	0.9072f,	0.375f,		0.375f,		255,	255,		"1 1/4"}
+	{0.25f,		0.7355f,	0.8035f,	0.4375f,	0.4375f,	128,	255,		"  1/4"},
+	{0.3125f,	0.7626f,	0.8161f,	0.4375f,	0.4375f,	150,	255,		" 5/16"},
+	{0.375f,	0.7772f,	0.8454f,	0.4375f,	0.4375f,	175,	255,		"  3/8"},
+	{0.4375f,	0.7829f,	0.8409f,	0.4375f,	0.4375f,	200,	255,		" 7/16"},
+	{0.5f,		0.7950f,	0.8601f,	0.4375f,	0.4375f,	300,	512,		"  1/2"},
+	{0.625f,	0.8068f,	0.8761f,	0.4375f,	0.4375f,	300,	255,		"  5/8"},
+	{0.75f,		0.8218f,	0.8841f,	0.4375f,	0.4375f,	350,	255,		"  3/4"},
+	{0.875f,	0.8301f,	0.8868f,	0.4375f,	0.4375f,	255,	255,		"  7/8"},
+	{1.0f,		0.8338f,	0.8851f,	0.4375f,	0.4375f,	255,	255,		"1    "},
+	{1.125f,	0.8321f,	0.8974f,	0.4375f,	0.4375f,	255,	255,		"1 1/8"},
+	{1.25f,		0.8479f,	0.9072f,	0.4375f,	0.4375f,	255,	255,		"1 1/4"}
 };
 
 LiquidCrystal lcd(8, 9, 10, 11, 12, 7);
@@ -447,8 +448,15 @@ void loop() {
 	if (newPumpStarted != pumpStarted) {
 		pumpStarted = newPumpStarted;
 		
-		if (!pumpStarted) {
+		if (pumpStarted) {
+#ifndef EXTERNAL_PUMP
+			RelayWrite(OUT_PUMP, true);
+#endif
+		} else {
 			StateChangeCleanup();
+#ifndef EXTERNAL_PUMP
+			RelayWrite(OUT_PUMP, false);
+#endif
 			initState = InitStateWaiting;
 			initModeHomeCount = 0;
 		}
@@ -712,7 +720,9 @@ void InitWaitInput() {
 
 void Zeroing() {
 	if (waitingForHomePressure) {
-		ZeroingPressureCallback();
+		if (currentPressure >= HOME_PRESSURE) {
+			ZeroingPressureCallback();
+		}
 	} else {
 		if (PURead(IN_STOP_LOWERED)) {
 			RelayWrite(OUT_LOWER_STOP, false);
@@ -764,7 +774,9 @@ void CalibrateStroke() {
 #endif
 		}
 	} else {
-		if (!PURead(IN_STOP_RAISED)) {
+		if (waitingForHomePressure && currentPressure >= HOME_PRESSURE) {
+			CalibrateStrokeCallback();
+		} else if (!PURead(IN_STOP_RAISED)) {
 			RelayWrite(OUT_RAISE_STOP, true);
 			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
 			return;
@@ -875,7 +887,7 @@ void LeaveModeInit() {
 
 void UpdatePositionManual() {
 	if (PURead(IN_MANUAL_PISTON_FORWARD) && PURead(IN_STOP_RAISED)) {
-		if (pistonPosition < maxPistonPosition && !PURead(IN_MAXIMUM_PISTON_POSITION)) {
+		if (!PURead(IN_MAXIMUM_PISTON_POSITION)) {
 			if (!PURead(OUT_VALVE_FORWARD)) {
 				RelayWrite(OUT_VALVE_FORWARD, true, OUT_VALVE_FORWARD_LED);
 				ignorePressureTime = millis() + COUP_BELIER_DELAY;
@@ -887,16 +899,10 @@ void UpdatePositionManual() {
 			return;
 		}
 	} else if (PURead(IN_MANUAL_PISTON_BACKWARD)) {
-		if (pistonPosition > minPistonPosition) {
-			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
-			if (!PURead(OUT_VALVE_BACKWARD)) {
-				RelayWrite(OUT_VALVE_BACKWARD, true, OUT_VALVE_BACKWARD_LED);
-				ignorePressureTime = millis() + COUP_BELIER_DELAY;
-			}
-		} else {
-			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
-			RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
-			return;
+		RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
+		if (!PURead(OUT_VALVE_BACKWARD)) {
+			RelayWrite(OUT_VALVE_BACKWARD, true, OUT_VALVE_BACKWARD_LED);
+			ignorePressureTime = millis() + COUP_BELIER_DELAY;
 		}
 	} else {
 		RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
@@ -913,7 +919,7 @@ void UpdatePositionManual() {
 
 void UpdateStopperManual() {
 	//	Check in safe zone to raise.
-	if (pistonPosition <= minPistonPosition + stopperSafePosition) {
+	//if (pistonPosition <= minPistonPosition + stopperSafePosition) {
 		if (PURead(IN_MANUAL_TOGGLE_STOPPER)) {
 			if (toggleStopperPressTime == -1) {
 				toggleStopperPressTime = millis();
@@ -935,9 +941,9 @@ void UpdateStopperManual() {
 
 			toggleStopperPressTime = -1;
 		}
-	} else {
+	/*} else {
 		toggleStopperPressTime = -1;
-	}
+	}*/
 }
 
 void UpdateViceManual() {
@@ -999,12 +1005,9 @@ void LoopManual() {
 			stopperToLow = false;
 			RelayWrite(OUT_LOWER_STOP, false);
 		}
-	} else if (initialized && pistonStrokeLength > 0 && stopperSafePosition > 0) {
+	} else {
 		UpdatePositionManual();
 		UpdateStopperManual();
-		UpdateViceManual();
-	} else {
-		//	Only allow vice control.
 		UpdateViceManual();
 	}
 
@@ -1972,8 +1975,20 @@ void RelayWrite(int relayPin, bool enabled) {
 }
 
 void RelayWrite(int relayPin, bool enabled, int ledPin) {
-	digitalWrite(relayPin, !enabled);
-	if (ledPin > -1) {
-		digitalWrite(ledPin, enabled);
+	if (digitalRead(relayPin) == enabled) {
+		digitalWrite(relayPin, !enabled);
+		if (ledPin > -1) {
+			digitalWrite(ledPin, enabled);
+		}
+#ifdef EXTERNAL_PUMP
+		switch (relayPin) {
+		case OUT_VALVE_FORWARD:
+		case OUT_VALVE_BACKWARD:
+		case OUT_VICE_CLOSE:
+		case OUT_VICE_OPEN:
+			digitalWrite(OUT_PUMP, !enabled);
+			break;
+		}
+#endif
 	}
 }
