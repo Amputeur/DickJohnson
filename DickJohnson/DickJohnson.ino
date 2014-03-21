@@ -21,7 +21,9 @@
 #define STOPPER_THICKNESS 0.375f * positionMultiplicator
 #define STOPPER_PADDING 0.125f * positionMultiplicator
 
-#define MAX_PRESSURE 400
+#define MAX_PRESSURE 512
+#define HOME_PRESSURE 400
+
 #define RECALIBRATE_HOLD_TIME 2500l
 #define NON_CRITICAL_INPUTS_HOLD_TIME 250l
 
@@ -35,6 +37,8 @@
 #define LEARNING_DELAY 100ul
 
 #define COUP_BELIER_DELAY 90
+
+#define COVER_OPENNED_PAUSE_DELAY 100ul
 
 #define THREAD_NC true
 #define THREAD_NF false
@@ -99,6 +103,7 @@
 #define OUT_RELAY_ACTIVATOR 39
 
 #define IN_PANIC 42
+#define IN_COVER 15
 
 #define IN_MAXIMUM_PISTON_POSITION 26
 
@@ -125,6 +130,7 @@ enum Message {
 	MessageErrorSystemNotInitialized,
 	MessageErrorExtrudePressure,
 	MessageErrorAutoModeGeneric,
+	MessageErrorCoverOpenned,
 	MessageConfigModePumpNotStarted,
 	MessageConfigModeNotInitialized,
 	MessageConfigModeMissingConfig,
@@ -147,6 +153,7 @@ String messages[MessageCount][MessageCount] = {
 	{"Init the system", "first."},	//	MessageErrorSystemNotInitialized
 	{"Max pressure", "reached."},	//	MessageErrorExtrudePressure
 	{"Error.", "Reset Auto Mode"}, 	//	MessageErrorAutoModeGeneric
+	{"Error.", "Close the cover."}, 	//	MessageErrorCoverOpenned
 	{"D:      L:", "Start the pump."},	//	MessageConfigModePumpNotStarted
 	{"D:      L:", "Press HOME"},	//	MessageConfigModeNotInitialized
 	{"D:      L:", "Missing Config"},	//	MessageConfigModeMissingConfig
@@ -182,7 +189,7 @@ RodSizeParams extrusionTable[SIZE_COUNT] = {
 	{0.3125f,	0.7626f,	0.8161f,	0.375f,		0.375f,		150,	255,		" 5/16"},
 	{0.375f,	0.7772f,	0.8454f,	0.375f,		0.375f,		175,	255,		"  3/8"},
 	{0.4375f,	0.7829f,	0.8409f,	0.375f,		0.375f,		200,	255,		" 7/16"},
-	{0.5f,		0.7950f,	0.8601f,	0.375f,		0.375f,		220,	512,		"  1/2"},
+	{0.5f,		0.7950f,	0.8601f,	0.375f,		0.375f,		300,	512,		"  1/2"},
 	{0.625f,	0.8068f,	0.8761f,	0.375f,		0.375f,		300,	255,		"  5/8"},
 	{0.75f,		0.8218f,	0.8841f,	0.375f,		0.375f,		350,	255,		"  3/4"},
 	{0.875f,	0.8301f,	0.8868f,	0.375f,		0.375f,		255,	255,		"  7/8"},
@@ -214,6 +221,7 @@ bool pumpStarted = false;
 bool stopRaised = false;
 
 bool isPanicked = true;
+bool isCoverOpenned = false;
 bool initialized = false;
 
 UnitType unitType = UNIT_MM;
@@ -242,7 +250,6 @@ bool stopperToHigh = false;
 bool stopperToLow = false;
 
 //	Callbacks
-void (*pressureCallback)() = 0;
 void (*maximumPositionCallback)() = 0;
 
 byte saveDataVersion = 0;
@@ -308,6 +315,10 @@ unsigned int forwardOvershoot = 0;
 unsigned int backwardOvershoot = 0;
 
 unsigned long ignorePressureTime = 0;
+bool waitingForHomePressure = false;
+
+unsigned long autoModeViceTimerDelta = 0ul;
+unsigned long coverOpennedTime = 0ul;
 
 #ifdef DEBUG_SERIAL
 unsigned long nextPistonPositionLogTime = 0;
@@ -367,6 +378,7 @@ void setup() {
 	SetupPin(IN_PEDAL, true, true);
 
 	SetupPin(IN_PANIC, true, true);
+	SetupPin(IN_COVER, true, true);
 
 	SetupPin(IN_MAXIMUM_PISTON_POSITION, true, true);
 
@@ -453,14 +465,10 @@ void loop() {
 	}
 
 	if (currentPressure >= MAX_PRESSURE) {
-		if (pressureCallback != 0) {
-			pressureCallback();
-		} else {
-			RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
-			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
-			RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
-			RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
-		}
+		RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
+		RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
+		RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
+		RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
 	}
 
 	Learn();
@@ -486,7 +494,7 @@ void loop() {
 			initModeHomeCount = 0;
 			initState = InitStateWaiting;
 
-			pressureCallback = 0;
+			waitingForHomePressure = false;
 			maximumPositionCallback = 0;
 
 			if (canReadRodSize || canReadExtrudeLength) {
@@ -520,6 +528,14 @@ void loop() {
 			currentMode = ModeAuto;
 			autoState = AutoStateFirstRunGoHome;
 			isLearning = false;
+			isCoverOpenned = false;
+			autoModeViceTimer = 0ul;
+			
+			if (!PURead(IN_COVER)) {
+				coverOpennedTime = COVER_OPENNED_PAUSE_DELAY;
+			} else {
+				coverOpennedTime = 0ul;
+			}
 
 			if (canReadRodSize || canReadExtrudeLength) {
 				detachInterrupt(CONFIG_ENCODER_A_INTERRUPT);
@@ -536,7 +552,7 @@ void loop() {
 					lastWaitTimes[i] = lastExtrudeTimes[i] = 0;
 				}
 
-				pressureCallback = &AutoFirstRunHomePressureCallback;
+				waitingForHomePressure = true;
 				maximumPositionCallback = &MaximumPositionReached;
 			} else {
 				//	TODO Error.
@@ -587,10 +603,10 @@ void LoopInit() {
 			currentMessage = MessageConfigModeZeroInProgress;
 			break;
 		case InitStateCalibrateStroke:
-			if (pressureCallback == 0) {
-				currentMessage = MessageConfigModeCalibrateStrokeEnterReal;
-			} else {
+			if (waitingForHomePressure) {
 				currentMessage = MessageConfigModeCalibrateStroke;
+			} else {
+				currentMessage = MessageConfigModeCalibrateStrokeEnterReal;
 			}
 			break;
 		case InitStateCalibrateStopper:
@@ -664,7 +680,7 @@ void InitWaitInput() {
 		homePressTime = -1;
 		if (!initialized || initModeHomeCount == 0 || heldTime < RECALIBRATE_HOLD_TIME) {
 			initState = InitStateZeroing;
-			pressureCallback = &ZeroingPressureCallback;
+			waitingForHomePressure = true;
 			maximumPositionCallback = 0;
 			if (!PURead(OUT_VALVE_BACKWARD)) {
 				RelayWrite(OUT_VALVE_BACKWARD, true, OUT_VALVE_BACKWARD_LED);
@@ -677,7 +693,7 @@ void InitWaitInput() {
 					canReadRodSize = false;
 					canReadExtrudeLength = false;
 					initState = InitStateCalibrateStroke;
-					pressureCallback = &CalibrateStrokeCallback;
+					waitingForHomePressure = true;
 					maximumPositionCallback = &CalibrateStrokeCallback;
 
 					initModeHomeCount = 2;
@@ -695,7 +711,9 @@ void InitWaitInput() {
 }
 
 void Zeroing() {
-	if (pressureCallback == 0) {
+	if (waitingForHomePressure) {
+		ZeroingPressureCallback();
+	} else {
 		if (PURead(IN_STOP_LOWERED)) {
 			RelayWrite(OUT_LOWER_STOP, false);
 			initialized = true;
@@ -711,15 +729,15 @@ void ZeroingPressureCallback() {
 	minPistonPosition = pistonPosition + PISTON_POSITION_PADDING;
 	maxPistonPosition = minPistonPosition + pistonStrokeLength;
 
+	waitingForHomePressure = false;
+
 	RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
 
 	attachInterrupt(PISTON_POSITION_ENCODER_A_INTERRUPT, PistonPositionInterrupt, CHANGE);
-
-	pressureCallback = 0;
 }
 
 void CalibrateStroke() {
-	if (pressureCallback == 0 && maximumPositionCallback == 0) {
+	if (!waitingForHomePressure && maximumPositionCallback == 0) {
 		UpdateDisplayRealStrokeLength();
 		if (PURead(IN_HOME)) {
 			if (homePressTime == -1) {
@@ -765,7 +783,7 @@ void CalibrateStrokeCallback() {
 		maxPistonPosition = pistonPosition;
 		pistonStrokeLength = maxPistonPosition - minPistonPosition;
 
-		pressureCallback = 0;
+		waitingForHomePressure = false;
 		maximumPositionCallback = 0;
 		attachInterrupt(CONFIG_ENCODER_A_INTERRUPT, UpdateStrokeLength, CHANGE);
 	}
@@ -1033,6 +1051,33 @@ void LoopAuto() {
 		return;
 	}
 
+	if (!PURead(IN_COVER)) {
+		if (coverOpennedTime == 0ul) {
+			coverOpennedTime = millis();
+		} else if (coverOpennedTime >= COVER_OPENNED_PAUSE_DELAY) {
+			if (!isCoverOpenned) {
+				isCoverOpenned = true;
+				StateChangeCleanup();
+
+				currentMessage = MessageErrorCoverOpenned;
+				UpdateDisplayComplete();
+
+				if (autoModeViceTimer != 0) {
+					autoModeViceTimerDelta = autoModeViceTimer - millis();
+				}
+			}
+			return;
+		}
+	} else if (isCoverOpenned) {
+		isCoverOpenned = false;
+
+		if (autoModeViceTimer != 0) {
+			autoModeViceTimer = millis() + autoModeViceTimerDelta;
+		}
+	} else if (coverOpennedTime != 0ul) {
+		coverOpennedTime = 0ul;
+	}
+
 	/*if (currentPressure >= MAX_PRESSURE) {
 		//	TODO Error Message.
 		return;
@@ -1043,6 +1088,10 @@ void LoopAuto() {
 		if (!PURead(OUT_VALVE_BACKWARD)) {
 			RelayWrite(OUT_VALVE_BACKWARD, true, OUT_VALVE_BACKWARD_LED);
 			ignorePressureTime = millis() + COUP_BELIER_DELAY;
+		}
+
+		if (currentPressure >= HOME_PRESSURE) {
+			AutoFirstRunHomePressureCallback();
 		}
 		break;
 	case AutoStateFirstRunLowerStopper:
@@ -1365,7 +1414,7 @@ bool MoveVice(bool destination) {
 
 void AutoFirstRunHomePressureCallback() {
 	autoState = AutoStateFirstRunLowerStopper;
-	pressureCallback = 0;
+	waitingForHomePressure = false;
 
 	if (!initialized) {
 		initialized = true;
