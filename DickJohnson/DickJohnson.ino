@@ -15,18 +15,19 @@
 #define MAX_ROD_SIZE 1.25f * ROD_SIZE_MULTIPLICATOR
 #define ROD_SIZE_MULTIPLICATOR 2000
 
-#define MIN_EXTRUDE_LENGTH 0.5f * EXTRUDE_LENGTH_MULTIPLICATOR
+#define MIN_EXTRUDE_LENGTH 1.0f * EXTRUDE_LENGTH_MULTIPLICATOR
 #define MAX_EXTRUDE_LENGTH 6.0f * EXTRUDE_LENGTH_MULTIPLICATOR
 #define EXTRUDE_LENGTH_MULTIPLICATOR 1250
 
 #define STOPPER_THICKNESS 0.375f * positionMultiplicator
 #define STOPPER_PADDING 0.125f * positionMultiplicator
+#define STOPPER_TIMER 125ul
 
 #define MAX_PRESSURE 512
 #define HOME_PRESSURE 400
 
 #define RECALIBRATE_HOLD_TIME 2500l
-#define NON_CRITICAL_INPUTS_HOLD_TIME 250l
+#define NON_CRITICAL_INPUTS_HOLD_TIME 150l
 
 #define PISTON_POSITION_ZERO_OFFSET 10000
 #define PISTON_POSITION_PADDING 0.125f * positionMultiplicator
@@ -186,17 +187,17 @@ struct RodSizeParams {
 #define SIZE_COUNT 11
 RodSizeParams extrusionTable[SIZE_COUNT] = {
 //	 Size		NC			NF			DieEntryNC	DieEntryNF	viceP	extrudeP	Name
-	{0.25f,		0.7355f,	0.8035f,	0.4375f,	0.4375f,	128,	255,		"  1/4"},
-	{0.3125f,	0.7626f,	0.8161f,	0.4375f,	0.4375f,	150,	255,		" 5/16"},
-	{0.375f,	0.7772f,	0.8454f,	0.4375f,	0.4375f,	175,	255,		"  3/8"},
-	{0.4375f,	0.7829f,	0.8409f,	0.4375f,	0.4375f,	200,	255,		" 7/16"},
-	{0.5f,		0.7950f,	0.8601f,	0.4375f,	0.4375f,	300,	512,		"  1/2"},
-	{0.625f,	0.8068f,	0.8761f,	0.4375f,	0.4375f,	300,	255,		"  5/8"},
-	{0.75f,		0.8218f,	0.8841f,	0.4375f,	0.4375f,	350,	255,		"  3/4"},
-	{0.875f,	0.8301f,	0.8868f,	0.4375f,	0.4375f,	255,	255,		"  7/8"},
-	{1.0f,		0.8338f,	0.8851f,	0.4375f,	0.4375f,	255,	255,		"1    "},
-	{1.125f,	0.8321f,	0.8974f,	0.4375f,	0.4375f,	255,	255,		"1 1/8"},
-	{1.25f,		0.8479f,	0.9072f,	0.4375f,	0.4375f,	255,	255,		"1 1/4"}
+	{0.25f,		0.7355f,	0.8035f,	0.4375f,	0.4375f,	151,	255,		"  1/4"},
+	{0.3125f,	0.7626f,	0.8161f,	0.4375f,	0.4375f,	189,	255,		" 5/16"},
+	{0.375f,	0.7772f,	0.8454f,	0.4375f,	0.4375f,	226,	255,		"  3/8"},
+	{0.4375f,	0.7829f,	0.8409f,	0.4375f,	0.4375f,	264,	255,		" 7/16"},
+	{0.5f,		0.7950f,	0.8601f,	0.4375f,	0.4375f,	302,	512,		"  1/2"},
+	{0.625f,	0.8068f,	0.8761f,	0.4375f,	0.4375f,	377,	512,		"  5/8"},
+	{0.75f,		0.8218f,	0.8841f,	0.4375f,	0.4375f,	453,	255,		"  3/4"},
+	{0.875f,	0.8301f,	0.8868f,	0.4375f,	0.4375f,	528,	255,		"  7/8"},
+	{1.0f,		0.8338f,	0.8851f,	0.4375f,	0.4375f,	604,	255,		"1    "},
+	{1.125f,	0.8321f,	0.8974f,	0.4375f,	0.4375f,	679,	255,		"1 1/8"},
+	{1.25f,		0.8479f,	0.9072f,	0.4375f,	0.4375f,	755,	255,		"1 1/4"}
 };
 
 LiquidCrystal lcd(8, 9, 10, 11, 12, 7);
@@ -249,6 +250,7 @@ unsigned long toggleStopperPressTime = -1;
 
 bool stopperToHigh = false;
 bool stopperToLow = false;
+unsigned long stopperTimer;
 
 //	Callbacks
 void (*maximumPositionCallback)() = 0;
@@ -579,6 +581,7 @@ void StateChangeCleanup() {
 
 void StateChangeCleanup(bool leaveMode) {
 	stopperToHigh = stopperToLow = false;
+	stopperTimer = 0ul;
 	RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
 	RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
 	RelayWrite(OUT_RAISE_STOP, false);
@@ -722,12 +725,17 @@ void Zeroing() {
 	if (waitingForHomePressure) {
 		if (currentPressure >= HOME_PRESSURE) {
 			ZeroingPressureCallback();
+			stopperTimer = 0ul;
 		}
 	} else {
 		if (PURead(IN_STOP_LOWERED)) {
-			RelayWrite(OUT_LOWER_STOP, false);
-			initialized = true;
-			initState = InitStateWaiting;
+			if (stopperTimer == 0ul) {
+				stopperTimer = millis() + STOPPER_TIMER;
+			} else if (millis() >= stopperTimer) {
+				RelayWrite(OUT_LOWER_STOP, false);
+				initialized = true;
+				initState = InitStateWaiting;
+			}
 		} else {
 			RelayWrite(OUT_LOWER_STOP, true);
 		}
@@ -931,11 +939,13 @@ void UpdateStopperManual() {
 					RelayWrite(OUT_RAISE_STOP, true);
 					stopperToHigh = true;
 					stopperToLow = false;
+					stopperTimer = 0ul;
 				} else if (PURead(IN_STOP_RAISED)) {
 					RelayWrite(OUT_LOWER_STOP, true);
 					RelayWrite(OUT_RAISE_STOP, false);
 					stopperToHigh = false;
 					stopperToLow = true;
+					stopperTimer = 0ul;
 				}
 			}
 
@@ -997,13 +1007,23 @@ void LoopManual() {
 		currentMessage = MessageConfigModePumpNotStarted;
 	} else if (stopperToHigh) {
 		if (PURead(IN_STOP_RAISED)) {
-			stopperToHigh = false;
-			RelayWrite(OUT_RAISE_STOP, false);
+			if (stopperTimer == 0ul) {
+				stopperTimer = millis() + STOPPER_TIMER;
+			} else if (millis() >= stopperTimer) {
+				stopperToHigh = false;
+				RelayWrite(OUT_RAISE_STOP, false);
+				stopperTimer = 0ul;
+			}
 		}
 	} else if (stopperToLow) {
 		if (PURead(IN_STOP_LOWERED)) {
-			stopperToLow = false;
-			RelayWrite(OUT_LOWER_STOP, false);
+			if (stopperTimer == 0ul) {
+				stopperTimer = millis() + STOPPER_TIMER;
+			} else if (millis() >= stopperTimer) {
+				stopperToLow = false;
+				RelayWrite(OUT_LOWER_STOP, false);
+				stopperTimer = 0ul;
+			}
 		}
 	} else {
 		UpdatePositionManual();
@@ -1085,6 +1105,12 @@ void LoopAuto() {
 		//	TODO Error Message.
 		return;
 	}*/
+
+	if (stopperTimer != 0ul && millis() >= stopperTimer) {
+		stopperTimer = 0ul;
+		RelayWrite(OUT_RAISE_STOP, false);
+		RelayWrite(OUT_LOWER_STOP, false);
+	}
 
 	switch (autoState) {
 	case AutoStateFirstRunGoHome:
@@ -1362,8 +1388,9 @@ bool GotoDestination(int destination, bool continueIf) {
 bool MoveStopper(bool destination) {
 	if (destination == HIGH) {
 		if (PURead(IN_STOP_RAISED)) {
-			RelayWrite(OUT_RAISE_STOP, false);
-			RelayWrite(OUT_LOWER_STOP, false);
+			stopperTimer = millis() + STOPPER_TIMER;
+			/*RelayWrite(OUT_RAISE_STOP, false);
+			RelayWrite(OUT_LOWER_STOP, false);*/
 			return true;
 		} else {
 			RelayWrite(OUT_RAISE_STOP, true);
@@ -1371,8 +1398,9 @@ bool MoveStopper(bool destination) {
 		}
 	} else {
 		if (PURead(IN_STOP_LOWERED)) {
-			RelayWrite(OUT_RAISE_STOP, false);
-			RelayWrite(OUT_LOWER_STOP, false);
+			stopperTimer = millis() + STOPPER_TIMER;
+			/*RelayWrite(OUT_RAISE_STOP, false);
+			RelayWrite(OUT_LOWER_STOP, false);*/
 			return true;
 		} else {
 			RelayWrite(OUT_RAISE_STOP, false);
