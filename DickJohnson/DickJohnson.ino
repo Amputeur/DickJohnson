@@ -1190,7 +1190,7 @@ void LoopAuto() {
 		}
 		break;
 	case AutoStateMoveForwardExtrude:
-		if (GotoDestination(autoModeExtrudePos, LOW)) {
+		if (MoveStopper(HIGH) && GotoDestination(autoModeExtrudePos, LOW)) {
 			autoState = AutoStateMoveBackwardPostExtrude;
 		} else {
 			if (currentPressure > autoModeExtrudePressure) {
