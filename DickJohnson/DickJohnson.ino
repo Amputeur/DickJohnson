@@ -25,6 +25,7 @@
 
 #define MAX_PRESSURE 512
 #define HOME_PRESSURE 400
+#define PRESSURE_ANALOG_TO_PSI 1.953125f
 
 #define RECALIBRATE_HOLD_TIME 1500l
 #define NON_CRITICAL_INPUTS_HOLD_TIME 150l
@@ -123,6 +124,8 @@ enum InitState {
 	InitStateCalibrateStroke,
 	InitStateCalibrateStopper,
 	InitStateCalibrateViceRaiseTime,
+	InitStateCalibrateVicePressure,
+	InitStateCalibrateExtrudePressure,
 };
 InitState initState = InitStateWaiting;
 
@@ -141,6 +144,8 @@ enum Message {
 	MessageConfigModeCalibrateStrokeEnterReal,
 	MessageConfigModeCalibrateStropper,
 	MessageConfigModeCalibrateViceRaiseTimer,
+	MessageConfigModeCalibrateVicePressure,
+	MessageConfigModeCalibrateExtrudePressure,
 	MessageConfigModeInitialized,
 	MessageAutoModeRunning,
 	MessageAutoModeStats,
@@ -149,7 +154,7 @@ enum Message {
 	MessageCount,
 };
 
-String messages[MessageCount][MessageCount] = {
+char* messages[MessageCount][MessageCount] = {
 	{" A BEbit Studio", "    MACHINE."},	//	MessageNone
 	{"Start the pump.", ""},	//	MessageErrorPumpNotStarted
 	{"Init the system", "first."},	//	MessageErrorSystemNotInitialized
@@ -164,6 +169,8 @@ String messages[MessageCount][MessageCount] = {
 	{"D:      L:", "Real:"},	//	MessageConfigModeCalibrateStrokeEnterReal
 	{"D:      L:", "HOME when clear"},	//	MessageConfigModeCalibrateStropper
 	{"D:      L:", "Raise Time: "},	//	MessageConfigModeCalibrateViceRaiseTimer
+	{"D:      L:", "Vice P: "},	//	MessageConfigModeCalibrateVicePressure
+	{"D:      L:", "Extr P: "},	//	MessageConfigModeCalibrateExtrudePressure
 	{"D:      L:", ""},	//	MessageConfigModeInitialized
 	{"D:      L:", "C:"},	//	MessageAutoModeRunning
 	{"TC:       A:", "C:        W:"},	//	MessageAutoModeStats
@@ -179,9 +186,9 @@ struct RodSizeParams {
 	float nfExtrudeNeeded;
 	float dieEntryNC;
 	float dieEntryNF;
-	int viceMaxPressure;
-	int extrudeMaxPressure;
-	String name;
+	unsigned int viceMaxPressure;
+	unsigned int extrudeMaxPressure;
+	char* name;
 };
 
 #define SIZE_COUNT 11
@@ -631,6 +638,12 @@ void LoopInit() {
 		case InitStateCalibrateViceRaiseTime:
 			currentMessage = MessageConfigModeCalibrateViceRaiseTimer;
 			break;
+		case InitStateCalibrateVicePressure:
+			currentMessage = MessageConfigModeCalibrateVicePressure;
+			break;
+		case InitStateCalibrateExtrudePressure:
+			currentMessage = MessageConfigModeCalibrateExtrudePressure;
+			break;
 		}
 	} else if (initialized) {
 		if (pistonStrokeLength == 0 || stopperSafePosition == 0) {
@@ -657,6 +670,12 @@ void LoopInit() {
 	case InitStateCalibrateViceRaiseTime:
 		CalibrateViceRaiseTime();
 		return;
+	case InitStateCalibrateVicePressure:
+		CalibrateVicePressure();
+		return;
+	case InitStateCalibrateExtrudePressure:
+		CalibrateExtrudePressure();
+		return;
 	default:
 		InitWaitInput();
 		break;
@@ -670,7 +689,7 @@ void InitWaitInput() {
 		return;
 	}
 
-	if (PURead(IN_MANUAL_OPEN_VICE) && PURead(IN_MANUAL_CLOSE_VICE)) {
+	if (PURead(IN_MANUAL_OPEN_VICE)) {
 		if (calibrateVicePressTime == -1) {
 			calibrateVicePressTime = millis();
 		}
@@ -682,6 +701,32 @@ void InitWaitInput() {
 			canReadExtrudeLength = false;
 
 			attachInterrupt(CONFIG_ENCODER_A_INTERRUPT, UpdateViceRaiseTimer, CHANGE);
+		}
+	} else if (PURead(IN_MANUAL_CLOSE_VICE)) {
+		if (calibrateVicePressTime == -1) {
+			calibrateVicePressTime = millis();
+		}
+		if ((millis() - calibrateVicePressTime) > RECALIBRATE_HOLD_TIME && initState != InitStateCalibrateVicePressure) {
+			calibrateVicePressTime = -1;
+			initState = InitStateCalibrateVicePressure;
+			detachInterrupt(CONFIG_ENCODER_A_INTERRUPT);
+			canReadRodSize = false;
+			canReadExtrudeLength = false;
+
+			attachInterrupt(CONFIG_ENCODER_A_INTERRUPT, UpdateVicePressure, CHANGE);
+		}
+	} else if (PURead(IN_MANUAL_PISTON_FORWARD)) {
+		if (calibrateVicePressTime == -1) {
+			calibrateVicePressTime = millis();
+		}
+		if ((millis() - calibrateVicePressTime) > RECALIBRATE_HOLD_TIME && initState != InitStateCalibrateExtrudePressure) {
+			calibrateVicePressTime = -1;
+			initState = InitStateCalibrateExtrudePressure;
+			detachInterrupt(CONFIG_ENCODER_A_INTERRUPT);
+			canReadRodSize = false;
+			canReadExtrudeLength = false;
+
+			attachInterrupt(CONFIG_ENCODER_A_INTERRUPT, UpdateExtrudePressure, CHANGE);
 		}
 	} else if (PURead(IN_HOME)) {
 		if (homePressTime == -1) {
@@ -841,7 +886,7 @@ void CalibrateStopper() {
 }
 
 void CalibrateViceRaiseTime() {
-	if (PURead(IN_MANUAL_OPEN_VICE) && PURead(IN_MANUAL_CLOSE_VICE)) {
+	if (PURead(IN_MANUAL_OPEN_VICE)) {
 		UpdateDisplayViceRaiseTime();
 	} else {
 		initState = InitStateWaiting;
@@ -851,25 +896,46 @@ void CalibrateViceRaiseTime() {
 	}
 }
 
-void ReadConfig() {
-	bool updateDisplay = false;
+void CalibrateVicePressure() {
+	if (PURead(IN_MANUAL_CLOSE_VICE)) {
+		UpdateDisplayRodSize();
+		UpdateDisplayExtureLength();
+		UpdateDisplayVicePressure();
+	} else {
+		initState = InitStateWaiting;
+		detachInterrupt(CONFIG_ENCODER_A_INTERRUPT);
 
+		SaveSystemSettings();
+	}
+}
+
+void CalibrateExtrudePressure() {
+	if (PURead(IN_MANUAL_PISTON_FORWARD)) {
+		UpdateDisplayRodSize();
+		UpdateDisplayExtureLength();
+		UpdateDisplayExtrudePressure();
+	} else {
+		initState = InitStateWaiting;
+		detachInterrupt(CONFIG_ENCODER_A_INTERRUPT);
+
+		SaveSystemSettings();
+	}
+}
+
+void ReadConfig() {
 	UnitType setUnit = PURead(IN_UNIT_SELECTOR);
 
 	if (prevRodSize != currentJobConfig.rodSize) {
-		updateDisplay = true;
 		prevRodSize = currentJobConfig.rodSize;
 		UpdateDisplayRodSize();
 	}
 
 	if (prevExtrudeLength != currentJobConfig.extrudeLength) {
-		updateDisplay = true;
 		prevExtrudeLength = currentJobConfig.extrudeLength;
 		UpdateDisplayExtureLength();
 	}
 
 	if (setUnit != unitType) {
-		updateDisplay = true;
 		unitType = setUnit;
 
 		UpdateDisplayRodSize();
@@ -1523,6 +1589,22 @@ void UpdateViceRaiseTimer() {
 	}
 }
 
+void UpdateVicePressure() {
+	if (digitalRead(CONFIG_ENCODER_A) != digitalRead(CONFIG_ENCODER_B)) {
+		extrusionTable[currentRodSizeIndex].viceMaxPressure = min(extrusionTable[currentRodSizeIndex].viceMaxPressure + 1, 1024);
+	} else {
+		extrusionTable[currentRodSizeIndex].viceMaxPressure = max(extrusionTable[currentRodSizeIndex].viceMaxPressure - 1, 1);
+	}
+}
+
+void UpdateExtrudePressure() {
+	if (digitalRead(CONFIG_ENCODER_A) != digitalRead(CONFIG_ENCODER_B)) {
+		extrusionTable[currentRodSizeIndex].extrudeMaxPressure = min(extrusionTable[currentRodSizeIndex].extrudeMaxPressure + 1, 1024);
+	} else {
+		extrusionTable[currentRodSizeIndex].extrudeMaxPressure = max(extrusionTable[currentRodSizeIndex].extrudeMaxPressure - 1, 1);
+	}
+}
+
 void UpdateStrokeLength() {
 	if (digitalRead(CONFIG_ENCODER_A) != digitalRead(CONFIG_ENCODER_B)) {
 		realStrokeLength ++;
@@ -1551,7 +1633,7 @@ void UpdateDisplayRodSize() {
 
 	int closestIndex = -1;
 	float closest = 999.0f;
-	String result = (String)currentJobConfig.rodSize;
+	char* result = "";
 	for (int i=0; i<SIZE_COUNT; i++) {
 		float dist = extrusionTable[i].size - fSize;
 		if (dist < 0.0f) {
@@ -1568,6 +1650,8 @@ void UpdateDisplayRodSize() {
 
 	if (currentRodSizeIndex >= 0) {
 		result = extrusionTable[currentRodSizeIndex].name;
+	} else {
+		result = "NA";
 	}
 
 	lcd.setCursor(2, 0);
@@ -1582,18 +1666,24 @@ void UpdateDisplayExtureLength() {
 	if (unitType == UNIT_MM) {
 		fLength *= 25.4f;
 
-		String result = "";
 		if (fLength < 10) {
-			result = "00";
+			lcd.print("  ");
 		} else if (fLength < 100) {
-			result = "0";
+			lcd.print(" ");
 		}
-		lcd.print(result + (String)(int)fLength + "mm");
+		lcd.print((int)fLength);
+		lcd.print("mm");
 	} else {
 		int major = currentJobConfig.extrudeLength / EXTRUDE_LENGTH_MULTIPLICATOR;
 		int minor = 100 * ((float)(currentJobConfig.extrudeLength % EXTRUDE_LENGTH_MULTIPLICATOR) / (float)EXTRUDE_LENGTH_MULTIPLICATOR);
 
-		lcd.print((String)major + "." + (minor<10?("0" + (String)minor):(String)minor) + "\"");
+		lcd.print(major);
+		lcd.print(".");
+		if (minor < 10) {
+			lcd.print("0");
+		}
+		lcd.print(minor);
+		lcd.print("\"");
 	}
 }
 
@@ -1657,6 +1747,20 @@ void UpdateDisplayViceRaiseTime() {
 	//	"Raise Time: "
 	lcd.setCursor(12, 1);
 	lcd.print(viceRaiseTimer);
+	lcd.print("   ");
+}
+
+void UpdateDisplayVicePressure() {
+	//	"Vice P: "
+	lcd.setCursor(8, 1);
+	lcd.print(extrusionTable[currentRodSizeIndex].viceMaxPressure * PRESSURE_ANALOG_TO_PSI);
+	lcd.print("   ");
+}
+
+void UpdateDisplayExtrudePressure() {
+	//	"Extr P: "
+	lcd.setCursor(8, 1);
+	lcd.print(extrusionTable[currentRodSizeIndex].extrudeMaxPressure * PRESSURE_ANALOG_TO_PSI);
 	lcd.print("   ");
 }
 
@@ -1725,6 +1829,14 @@ void LoadEEPROM() {
 		viceRaiseTimer = eeprom_read_word((unsigned int*)curAdd);
 		viceRaiseTimer = max(viceRaiseTimer, VICE_RAISE_TIMER_MIN);
 		curAdd += sizeof(viceRaiseTimer);
+
+		for (int i=0; i<SIZE_COUNT; i++) {
+			extrusionTable[i].viceMaxPressure = eeprom_read_word((unsigned int*)curAdd);
+			curAdd += sizeof(extrusionTable[i].viceMaxPressure);
+
+			extrusionTable[i].extrudeMaxPressure = eeprom_read_word((unsigned int*)curAdd);
+			curAdd += sizeof(extrusionTable[i].extrudeMaxPressure);
+		}
 
 #ifdef DEBUG_SERIAL
 		Serial.print("Piston Stroke Length: ");
@@ -1839,10 +1951,26 @@ void SaveSystemSettings() {
 		eeprom_write_word((unsigned int*)curAdd, stopperSafePosition);
 	}
 
-	curAdd += sizeof(viceRaiseTimer);
+	curAdd += sizeof(stopperSafePosition);
 
 	if (eeprom_read_word((unsigned int*)curAdd) != viceRaiseTimer) {
 		eeprom_write_word((unsigned int*)curAdd, viceRaiseTimer);
+	}
+
+	curAdd += sizeof(viceRaiseTimer);
+
+	for (int i=0; i<SIZE_COUNT; i++) {
+		if (eeprom_read_word((unsigned int*)curAdd) != extrusionTable[i].viceMaxPressure) {
+			eeprom_write_word((unsigned int*)curAdd, extrusionTable[i].viceMaxPressure);
+		}
+
+		curAdd += sizeof(extrusionTable[i].viceMaxPressure);
+
+		if (eeprom_read_word((unsigned int*)curAdd) != extrusionTable[i].extrudeMaxPressure) {
+			eeprom_write_word((unsigned int*)curAdd, extrusionTable[i].extrudeMaxPressure);
+		}
+
+		curAdd += sizeof(extrusionTable[i].extrudeMaxPressure);
 	}
 
 	if (initEEPROM) {
@@ -1853,8 +1981,6 @@ void SaveSystemSettings() {
 		eepromReservedSize += sizeof(unsigned int) * ROD_COUNT_RING_COUNT;
 
 		//	Zero the reserved range!
-		curAdd += sizeof(stopperSafePosition);
-
 #ifdef DEBUG_SERIAL
 		Serial.print("Zeroing ");
 		Serial.print(eepromReservedSize);
@@ -1883,7 +2009,8 @@ int GetJobConfigEEPROMAddress() {
 	sizeof(pistonStrokeLength) +
 	sizeof(positionMultiplicator) +
 	sizeof(stopperSafePosition) +
-	sizeof(viceRaiseTimer);
+	sizeof(viceRaiseTimer) +
+	((sizeof(unsigned int) + sizeof(unsigned int)) * SIZE_COUNT);
 }
 
 int GetRodCountEEPROM_Address() {
