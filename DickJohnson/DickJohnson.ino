@@ -308,14 +308,11 @@ int learningDirection = 0;
 unsigned int learningTargetPosition = 0;
 unsigned int learningPrevPistonPosition = 0;
 
-int learningBackwardValues[LEARNING_COUNT] = {-1};
-unsigned int learningBackwardValuesCount = 0;
 int learningForwardValues[LEARNING_COUNT] = {-1};
 unsigned int learningForwardValuesCount = 0;
 unsigned long learningTargetTime = 0ul;
 
 unsigned int forwardOvershoot = 0;
-unsigned int backwardOvershoot = 0;
 
 unsigned long ignorePressureTime = 0;
 bool waitingForHomePressure = false;
@@ -1280,29 +1277,7 @@ void Learn() {
 
 				int delta = learningTargetPosition - pistonPosition;
 
-				if (learningDirection == -1) {
-					//	Backward
-					learningBackwardValues[learningBackwardValuesCount%LEARNING_COUNT] = delta + backwardOvershoot;
-					learningBackwardValuesCount++;
-
-					unsigned int total = 0;
-					byte learnedCount = 0;
-					for (int i=0; i<LEARNING_COUNT; i++) {
-						if (i < learningBackwardValuesCount) {
-							learnedCount++;
-							total += learningBackwardValues[i];
-						}
-					}
-
-					if (learnedCount > 0) {
-						backwardOvershoot = (int)((float)total / (float)learnedCount);
-#ifdef DEBUG_SERIAL
-						Serial.print("backwardOvershoot average: ");
-						Serial.print(backwardOvershoot);
-						Serial.print("\n");
-#endif
-					}
-				} else if (learningDirection == 1) {
+				if (learningDirection == 1) {
 					//	Forward
 					delta *= -1;
 
@@ -1337,7 +1312,7 @@ void Learn() {
 
 bool GotoDestination(int destination, bool continueIf) {
 	if (continueIf == HIGH) {
-		if (pistonPosition <= (destination + backwardOvershoot)) {
+		if (pistonPosition <= destination) {
 			RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
 			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
 
@@ -1348,10 +1323,6 @@ bool GotoDestination(int destination, bool continueIf) {
 			Serial.print(pistonPosition);
 			Serial.print("\n");
 #endif
-			isLearning = true;
-			learningTargetTime = millis() + LEARNING_DELAY;
-			learningDirection = -1;
-			learningTargetPosition = destination;
 			return true;
 		} else {
 			if (!PURead(OUT_VALVE_BACKWARD)) {
@@ -2130,16 +2101,11 @@ void takeADump(char dumpType) {
 		printSerialVariableUI("learningTargetPosition", learningTargetPosition);
 		printSerialVariableUI("learningPrevPistonPosition", learningPrevPistonPosition);
 
-		printSerialVariableIArray("learningBackwardValues", learningBackwardValues, LEARNING_COUNT);
-
-		printSerialVariableUI("learningBackwardValuesCount", learningBackwardValuesCount);
-
 		printSerialVariableIArray("learningForwardValues", learningForwardValues, LEARNING_COUNT);
 
 		printSerialVariableUI("learningForwardValuesCount", learningForwardValuesCount);
 		printSerialVariableUL("learningTargetTime", learningTargetTime);
 		printSerialVariableUI("forwardOvershoot", forwardOvershoot);
-		printSerialVariableUI("backwardOvershoot", backwardOvershoot);
 	}
 }
 
