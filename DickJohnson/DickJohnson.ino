@@ -2,7 +2,7 @@
 #include "avr/eeprom.h"
 
 #define DEBUG_SERIAL
-//#define ENABLE_SAVE_TO_EEPROM
+#define ENABLE_SAVE_TO_EEPROM
 #define EXTERNAL_PUMP
 
 #define SAVE_DATA_VERSION 3
@@ -20,13 +20,13 @@
 #define EXTRUDE_LENGTH_MULTIPLICATOR 1250
 
 #define STOPPER_THICKNESS 0.375f * positionMultiplicator
-#define STOPPER_PADDING 0.125f * positionMultiplicator
+#define STOPPER_PADDING 0.25f * positionMultiplicator
 #define STOPPER_TIMER 125ul
 
 #define MAX_PRESSURE 512
 #define HOME_PRESSURE 400
 
-#define RECALIBRATE_HOLD_TIME 2500l
+#define RECALIBRATE_HOLD_TIME 1500l
 #define NON_CRITICAL_INPUTS_HOLD_TIME 150l
 
 #define PISTON_POSITION_ZERO_OFFSET 10000
@@ -191,7 +191,7 @@ RodSizeParams extrusionTable[SIZE_COUNT] = {
 	{0.3125f,	0.7626f,	0.8161f,	0.4375f,	0.4375f,	189,	255,		" 5/16"},
 	{0.375f,	0.7772f,	0.8454f,	0.4375f,	0.4375f,	226,	255,		"  3/8"},
 	{0.4375f,	0.7829f,	0.8409f,	0.4375f,	0.4375f,	264,	255,		" 7/16"},
-	{0.5f,		0.7950f,	0.8601f,	0.4375f,	0.4375f,	302,	512,		"  1/2"},
+	{0.5f,		0.7950f,	0.8601f,	0.4375f,	0.4375f,	377,	512,		"  1/2"},
 	{0.625f,	0.8068f,	0.8761f,	0.4375f,	0.4375f,	377,	512,		"  5/8"},
 	{0.75f,		0.8218f,	0.8841f,	0.4375f,	0.4375f,	453,	255,		"  3/4"},
 	{0.875f,	0.8301f,	0.8868f,	0.4375f,	0.4375f,	528,	255,		"  7/8"},
@@ -410,6 +410,14 @@ void loop() {
 		}
 	}
 #endif
+
+#ifdef DEBUG_SERIAL
+	if (Serial.available() > 0) {
+		takeADump(Serial.peek());
+		Serial.read();
+	}
+#endif
+
 	bool newPanic = PURead(IN_PANIC);
 
 	if (newPanic != isPanicked) {
@@ -1307,9 +1315,6 @@ void Learn() {
 						if (i < learningForwardValuesCount) {
 							learnedCount++;
 							total += learningForwardValues[i];
-
-							Serial.print(learningForwardValues[i]);
-							Serial.print("\n");
 						}
 					}
 
@@ -2020,3 +2025,201 @@ void RelayWrite(int relayPin, bool enabled, int ledPin) {
 #endif
 	}
 }
+
+#ifdef DEBUG_SERIAL
+void takeADump(char dumpType) {
+	//	States
+	if (dumpType == 'a' || dumpType == 's') {
+		printSerialVariableI("currentMode", currentMode);
+		printSerialVariableI("initState", initState);
+		printSerialVariableI("currentMessage", currentMessage);
+		printSerialVariableI("lastMessage", lastMessage);
+	}
+
+	//	Job Info
+	if (dumpType == 'a' || dumpType == 'j') {
+		printSerialVariableJobConfig("currentJobConfig", currentJobConfig);
+		printSerialVariableJobConfig("loadedJobConfig", loadedJobConfig);
+		printSerialVariableI("prevRodSize", prevRodSize);
+		printSerialVariableB("canReadRodSize", canReadRodSize);
+		printSerialVariableI("currentRodSizeIndex", currentRodSizeIndex);
+		printSerialVariableI("prevExtrudeLength", prevExtrudeLength);
+		printSerialVariableB("canReadExtrudeLength", canReadExtrudeLength);
+	}
+
+	//	Flags
+	if (dumpType == 'a' || dumpType == 'f') {
+		printSerialVariableB("pumpStarted", pumpStarted);
+		printSerialVariableB("stopRaised", stopRaised);
+		printSerialVariableB("isPanicked", isPanicked);
+		printSerialVariableB("isCoverOpenned", isCoverOpenned);
+		printSerialVariableB("initialized", initialized);
+		printSerialVariableB("unitType", unitType);
+		printSerialVariableB("threadType", threadType);
+		printSerialVariableB("displayStats", displayStats);
+	}
+
+	//	Piston
+	if (dumpType == 'a' || dumpType == 'p') {
+		printSerialVariableUI("pistonPosition", pistonPosition);
+		printSerialVariableUI("pistonStrokeLength", pistonStrokeLength);
+		printSerialVariableUI("realStrokeLength", realStrokeLength);
+		printSerialVariableF("positionMultiplicator", positionMultiplicator);
+		printSerialVariableUI("stopperSafePosition", stopperSafePosition);
+		printSerialVariableUI("minPistonPosition", minPistonPosition);
+		printSerialVariableUI("maxPistonPosition", maxPistonPosition);
+	}
+
+	//	Misc
+	if (dumpType == 'a' || dumpType == 'm') {
+		printSerialVariableUI("viceRaiseTimer", viceRaiseTimer);
+		printSerialVariableI("currentPressure", currentPressure);
+		printSerialVariableI("initModeHomeCount", initModeHomeCount);
+		printSerialVariableUI("homePressTime", homePressTime);
+		printSerialVariableUI("calibrateVicePressTime", calibrateVicePressTime);
+		printSerialVariableUI("manualViceOpenPressTime", manualViceOpenPressTime);
+		printSerialVariableUI("manualViceClosePressTime", manualViceClosePressTime);
+		printSerialVariableUI("toggleStopperPressTime", toggleStopperPressTime);
+		printSerialVariableB("stopperToHigh", stopperToHigh);
+		printSerialVariableB("stopperToLow", stopperToLow);
+		printSerialVariableUL("stopperTimer", stopperTimer);
+		printSerialVariableBYTE("saveDataVersion", saveDataVersion);
+		printSerialVariableI("jobConfigRingPosition", jobConfigRingPosition);
+	}
+
+	//	Auto
+	if (dumpType == 'a' || dumpType == 'o') {
+		printSerialVariableUL("rodCount", rodCount);
+		printSerialVariableI("rodCountRingPosition", rodCountRingPosition);
+		printSerialVariableI("autoState", autoState);
+		printSerialVariableI("autoModeStartPos", autoModeStartPos);
+		printSerialVariableI("autoModeBackPos", autoModeBackPos);
+		printSerialVariableI("autoModeRaiseStopperPos", autoModeRaiseStopperPos);
+		printSerialVariableI("autoModeExtrudePos", autoModeExtrudePos);
+		printSerialVariableI("autoModeVicePressure", autoModeVicePressure);
+		printSerialVariableI("autoModeExtrudePressure", autoModeExtrudePressure);
+		printSerialVariableI("autoModeViceTimer", autoModeViceTimer);
+		printSerialVariableUI("thisJobRodCount", thisJobRodCount);
+		printSerialVariableB("autoModeHomeWasDown", autoModeHomeWasDown);
+
+		printSerialVariableUL("ignorePressureTime", ignorePressureTime);
+		printSerialVariableB("waitingForHomePressure", waitingForHomePressure);
+		printSerialVariableUL("autoModeViceTimerDelta", autoModeViceTimerDelta);
+		printSerialVariableUL("coverOpennedTime", coverOpennedTime);
+
+		printSerialVariableUL("nextPistonPositionLogTime", nextPistonPositionLogTime);
+		printSerialVariableUI("logPrevPistonPosition", logPrevPistonPosition);
+
+		printSerialVariableB("predalWasReleased", predalWasReleased);
+	}
+
+	//	Timing
+	if (dumpType == 'a' || dumpType == 't') {
+		printSerialVariableULArray("lastExtrudeTimes", lastExtrudeTimes, STATS_AVERAGE_TIME_SAMPLING_COUNT);
+		printSerialVariableULArray("lastWaitTimes", lastWaitTimes, STATS_AVERAGE_TIME_SAMPLING_COUNT);
+
+		printSerialVariableUI("currentSamplingIndex", currentSamplingIndex);
+		printSerialVariableUL("refWaitTime", refWaitTime);
+		printSerialVariableUL("refExtrudeTime", refExtrudeTime);
+	}
+
+	//	Learning
+	if (dumpType == 'a' || dumpType == 'l') {
+		printSerialVariableB("isLearning", isLearning);
+		printSerialVariableI("learningDirection", learningDirection);
+		printSerialVariableUI("learningTargetPosition", learningTargetPosition);
+		printSerialVariableUI("learningPrevPistonPosition", learningPrevPistonPosition);
+
+		printSerialVariableIArray("learningBackwardValues", learningBackwardValues, LEARNING_COUNT);
+
+		printSerialVariableUI("learningBackwardValuesCount", learningBackwardValuesCount);
+
+		printSerialVariableIArray("learningForwardValues", learningForwardValues, LEARNING_COUNT);
+
+		printSerialVariableUI("learningForwardValuesCount", learningForwardValuesCount);
+		printSerialVariableUL("learningTargetTime", learningTargetTime);
+		printSerialVariableUI("forwardOvershoot", forwardOvershoot);
+		printSerialVariableUI("backwardOvershoot", backwardOvershoot);
+	}
+}
+
+void printSerialVariableI(char* variableName, int variableValue) {
+	Serial.print(variableName);
+	Serial.print(": ");
+	Serial.print(variableValue);
+	Serial.print("\n");
+}
+
+void printSerialVariableUI(char* variableName, unsigned int variableValue) {
+	Serial.print(variableName);
+	Serial.print(": ");
+	Serial.print(variableValue);
+	Serial.print("\n");
+}
+
+void printSerialVariableUL(char* variableName, unsigned long variableValue) {
+	Serial.print(variableName);
+	Serial.print(": ");
+	Serial.print(variableValue);
+	Serial.print("\n");
+}
+
+void printSerialVariableBYTE(char* variableName, byte variableValue) {
+	Serial.print(variableName);
+	Serial.print(": ");
+	Serial.print(variableValue);
+	Serial.print("\n");
+}
+
+void printSerialVariableB(char* variableName, bool variableValue) {
+	Serial.print(variableName);
+	Serial.print(": ");
+	Serial.print(variableValue ? "TRUE" : "FALSE");
+	Serial.print("\n");
+}
+
+void printSerialVariableF(char* variableName, float variableValue) {
+	Serial.print(variableName);
+	Serial.print(": ");
+	Serial.print(variableValue);
+	Serial.print("\n");
+}
+
+void printSerialVariableJobConfig(char* variableName, JobConfig variableValue) {
+	Serial.print(variableName);
+	Serial.print("\n");
+	Serial.print("	jobID: ");
+	Serial.print(variableValue.jobID);
+	Serial.print("\n");
+	Serial.print("	rodSize: ");
+	Serial.print(variableValue.rodSize);
+	Serial.print("\n");
+	Serial.print("	extrudeLength: ");
+	Serial.print(variableValue.extrudeLength);
+	Serial.print("\n");
+}
+
+void printSerialVariableULArray(char* variableName, unsigned long variableValue[], int arrayLen) {
+	Serial.print(variableName);
+	Serial.print("\n");
+	for (int i=0; i<arrayLen; i++) {
+		Serial.print("	");
+		Serial.print(i);
+		Serial.print(": ");
+		Serial.print(variableValue[i]);
+		Serial.print("\n");
+	}
+}
+
+void printSerialVariableIArray(char* variableName, int variableValue[], int arrayLen) {
+	Serial.print(variableName);
+	Serial.print("\n");
+	for (int i=0; i<arrayLen; i++) {
+		Serial.print("	");
+		Serial.print(i);
+		Serial.print(": ");
+		Serial.print(variableValue[i]);
+		Serial.print("\n");
+	}
+}
+#endif
