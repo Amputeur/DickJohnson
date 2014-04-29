@@ -5,7 +5,7 @@
 #define ENABLE_SAVE_TO_EEPROM
 #define EXTERNAL_PUMP
 
-#define SAVE_DATA_VERSION 3
+#define SAVE_DATA_VERSION 4
 #define EEPROM_VERSION_ADDRESS 0
 #define JOB_CONFIG_RING_COUNT 8
 #define ROD_COUNT_RING_COUNT  32
@@ -967,11 +967,11 @@ void LeaveModeInit() {
 void UpdatePositionManual() {
 	if (PURead(IN_MANUAL_PISTON_FORWARD) && PURead(IN_STOP_RAISED)) {
 		if (!PURead(IN_MAXIMUM_PISTON_POSITION)) {
+			RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
 			if (!PURead(OUT_VALVE_FORWARD)) {
 				RelayWrite(OUT_VALVE_FORWARD, true, OUT_VALVE_FORWARD_LED);
 				ignorePressureTime = millis() + COUP_BELIER_DELAY;
 			}
-			RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
 		} else {
 			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
 			RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
@@ -1048,11 +1048,11 @@ void UpdateViceManual() {
 	}
 
 	if (open && (millis() - manualViceOpenPressTime) > NON_CRITICAL_INPUTS_HOLD_TIME) {
+		RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
 		if (!PURead(OUT_VICE_OPEN)) {
 			RelayWrite(OUT_VICE_OPEN, true, OUT_VICE_OPEN_LED);
 			ignorePressureTime = millis() + COUP_BELIER_DELAY;
 		}
-		RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
 	} else if (((close && (millis() - manualViceClosePressTime) > NON_CRITICAL_INPUTS_HOLD_TIME)
 			|| PURead(IN_PEDAL))
 			&& currentRodSizeIndex >= 0
@@ -1123,6 +1123,7 @@ void LoopManual() {
 
 		if (pistonPosition != prevPistonPosition || threadType != prevThreadType || unitType != prevUnitType) {
 			UpdateDisplayResultingLength();
+			UpdateDisplayExtureLength();
 		}
 	}
 }
@@ -1391,11 +1392,11 @@ bool GotoDestination(int destination, bool continueIf) {
 #endif
 			return true;
 		} else {
+			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
 			if (!PURead(OUT_VALVE_BACKWARD)) {
 				RelayWrite(OUT_VALVE_BACKWARD, true, OUT_VALVE_BACKWARD_LED);
 				ignorePressureTime = millis() + COUP_BELIER_DELAY;
 			}
-			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
 		}
 	} else {
 		if (pistonPosition >= (destination - forwardOvershoot)) {
@@ -1435,8 +1436,8 @@ bool MoveStopper(bool destination) {
 			RelayWrite(OUT_LOWER_STOP, false);*/
 			return true;
 		} else {
-			RelayWrite(OUT_RAISE_STOP, true);
 			RelayWrite(OUT_LOWER_STOP, false);
+			RelayWrite(OUT_RAISE_STOP, true);
 		}
 	} else {
 		if (PURead(IN_STOP_LOWERED)) {
@@ -1474,11 +1475,12 @@ bool MoveVice(bool destination) {
 			RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
 			return true;
 		} else {
+			RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
+
 			if (!PURead(OUT_VICE_CLOSE)) {
 				RelayWrite(OUT_VICE_CLOSE, true, OUT_VICE_CLOSE_LED);
 				ignorePressureTime = millis() + COUP_BELIER_DELAY;
 			}
-			RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
 		}
 	}
 
