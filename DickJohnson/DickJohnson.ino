@@ -21,7 +21,7 @@
 
 #define STOPPER_THICKNESS 0.375f * positionMultiplicator
 #define STOPPER_PADDING 0.25f * positionMultiplicator
-#define STOPPER_TIMER 125ul
+#define STOPPER_TIMER 75ul
 
 #define MAX_PRESSURE 512
 #define HOME_PRESSURE 400
