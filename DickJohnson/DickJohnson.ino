@@ -21,9 +21,9 @@
 
 #define STOPPER_THICKNESS 0.375f * positionMultiplicator
 #define STOPPER_PADDING 0.25f * positionMultiplicator
-#define STOPPER_TIMER 75ul
+#define STOPPER_TIMER 150ul
 
-#define MAX_PRESSURE 512
+#define MAX_PRESSURE 768
 #define HOME_PRESSURE 400
 #define PRESSURE_ANALOG_TO_PSI 1.953125f
 
@@ -39,7 +39,7 @@
 #define LEARNING_COUNT 5
 #define LEARNING_DELAY 100ul
 
-#define COUP_BELIER_DELAY 90
+#define COUP_BELIER_DELAY 90ul
 
 #define COVER_OPENNED_PAUSE_DELAY 100ul
 
@@ -1053,15 +1053,20 @@ void UpdateViceManual() {
 			RelayWrite(OUT_VICE_OPEN, true, OUT_VICE_OPEN_LED);
 			ignorePressureTime = millis() + COUP_BELIER_DELAY;
 		}
-	} else if (((close && (millis() - manualViceClosePressTime) > NON_CRITICAL_INPUTS_HOLD_TIME)
-			|| PURead(IN_PEDAL))
-			&& currentRodSizeIndex >= 0
-			&& currentPressure <= extrusionTable[currentRodSizeIndex].viceMaxPressure) {
+	} else if (manualViceClosePressTime != -2
+			&& ((close && (millis() - manualViceClosePressTime) > NON_CRITICAL_INPUTS_HOLD_TIME)
+			|| PURead(IN_PEDAL))	//	TODO Over pressure thing...
+			&& currentRodSizeIndex >= 0) {
 
 		RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
 		if (!PURead(OUT_VICE_CLOSE)) {
+			Serial.print("Close Vice\n");
 			RelayWrite(OUT_VICE_CLOSE, true, OUT_VICE_CLOSE_LED);
 			ignorePressureTime = millis() + COUP_BELIER_DELAY;
+		} else if (currentPressure >= extrusionTable[currentRodSizeIndex].viceMaxPressure) {
+			Serial.print("Over max Vice Pressure\n");
+			RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
+			manualViceClosePressTime = -2;
 		}
 	} else {
 		RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
@@ -1189,6 +1194,7 @@ void LoopAuto() {
 		if (!PURead(OUT_VALVE_BACKWARD)) {
 			RelayWrite(OUT_VALVE_BACKWARD, true, OUT_VALVE_BACKWARD_LED);
 			ignorePressureTime = millis() + COUP_BELIER_DELAY;
+			currentPressure = 0;
 		}
 
 		if (currentPressure >= HOME_PRESSURE) {
@@ -1233,6 +1239,7 @@ void LoopAuto() {
 		if (PURead(IN_PEDAL)) {
 			if (predalWasReleased) {
 				autoState = AutoStateClosingVice;
+				ignorePressureTime = millis() + COUP_BELIER_DELAY;
 				lastWaitTimes[currentSamplingIndex] = millis() - refWaitTime;
 				if (displayStats) {
 					UpdateDisplayStats();
@@ -1245,6 +1252,7 @@ void LoopAuto() {
 	case AutoStateClosingVice:
 		if (MoveVice(LOW)) {
 			autoState = AutoStateMoveBackwardForStopper;
+			ignorePressureTime = millis() + COUP_BELIER_DELAY;
 		}
 		break;
 	case AutoStateMoveBackwardForStopper:
@@ -1259,11 +1267,13 @@ void LoopAuto() {
 	case AutoStateRaiseStopper:
 		if (MoveStopper(HIGH)) {
 			autoState = AutoStateMoveForwardExtrude;
+			ignorePressureTime = millis() + COUP_BELIER_DELAY;
 		}
 		break;
 	case AutoStateMoveForwardExtrude:
 		if (MoveStopper(HIGH) && GotoDestination(autoModeExtrudePos, LOW)) {
 			autoState = AutoStateMoveBackwardPostExtrude;
+			ignorePressureTime = millis() + COUP_BELIER_DELAY;
 		} else {
 			if (currentPressure > autoModeExtrudePressure) {
 				RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
@@ -1283,6 +1293,7 @@ void LoopAuto() {
 	case AutoStateLowerStopper:
 		if (MoveStopper(LOW)) {
 			autoState = AutoStateOpenVice;
+			ignorePressureTime = millis() + COUP_BELIER_DELAY;
 			//	Set the timer for the Vice to open.
 			autoModeViceTimer = millis() + (unsigned long)viceRaiseTimer;
 		}
@@ -1290,6 +1301,7 @@ void LoopAuto() {
 	case AutoStateOpenVice:
 		if (MoveVice(HIGH)) {
 			autoState = AutoStateMoveForwardToStartPos;
+			ignorePressureTime = millis() + COUP_BELIER_DELAY;
 		}
 		break;
 	case AutoStateMoveForwardToStartPos:
@@ -1473,6 +1485,7 @@ bool MoveVice(bool destination) {
 		if (currentPressure >= autoModeVicePressure) {
 			RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
 			RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
+
 			return true;
 		} else {
 			RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
@@ -2202,6 +2215,7 @@ void takeADump(char dumpType) {
 		printSerialVariableUI("thisJobRodCount", thisJobRodCount);
 		printSerialVariableB("autoModeHomeWasDown", autoModeHomeWasDown);
 
+		printSerialVariableUL("millis", millis());
 		printSerialVariableUL("ignorePressureTime", ignorePressureTime);
 		printSerialVariableB("waitingForHomePressure", waitingForHomePressure);
 		printSerialVariableUL("autoModeViceTimerDelta", autoModeViceTimerDelta);
