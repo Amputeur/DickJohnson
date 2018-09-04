@@ -40,6 +40,7 @@
 #define LEARNING_DELAY 100ul
 
 #define COUP_BELIER_DELAY 90ul
+#define POST_EXTRUDE_DELAY 100ul
 
 #define COVER_OPENNED_PAUSE_DELAY 100ul
 
@@ -281,6 +282,7 @@ enum AutoState {
 	AutoStateStopOil,
 	AutoStateRaiseStopper,
 	AutoStateMoveForwardExtrude,
+	AutoStateMovePostExtrudePause,
 	AutoStateMoveBackwardPostExtrude,
 	AutoStateLowerStopper,
 	AutoStateOpenVice,
@@ -321,7 +323,8 @@ unsigned long learningTargetTime = 0ul;
 
 unsigned int forwardOvershoot = 0;
 
-unsigned long ignorePressureTime = 0;
+unsigned long ignorePressureTime = 0ul;
+unsigned long postExtrudePauseTime = 0ul;
 bool waitingForHomePressure = false;
 
 unsigned long autoModeViceTimerDelta = 0ul;
@@ -1060,11 +1063,9 @@ void UpdateViceManual() {
 
 		RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
 		if (!PURead(OUT_VICE_CLOSE)) {
-			Serial.print("Close Vice\n");
 			RelayWrite(OUT_VICE_CLOSE, true, OUT_VICE_CLOSE_LED);
 			ignorePressureTime = millis() + COUP_BELIER_DELAY;
 		} else if (currentPressure >= extrusionTable[currentRodSizeIndex].viceMaxPressure) {
-			Serial.print("Over max Vice Pressure\n");
 			RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
 			manualViceClosePressTime = -2;
 		}
@@ -1272,8 +1273,8 @@ void LoopAuto() {
 		break;
 	case AutoStateMoveForwardExtrude:
 		if (MoveStopper(HIGH) && GotoDestination(autoModeExtrudePos, LOW)) {
-			autoState = AutoStateMoveBackwardPostExtrude;
-			ignorePressureTime = millis() + COUP_BELIER_DELAY;
+			autoState = AutoStateMovePostExtrudePause;
+			postExtrudePauseTime = millis() + POST_EXTRUDE_DELAY;
 		} else {
 			if (currentPressure > autoModeExtrudePressure) {
 				RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
@@ -1283,6 +1284,12 @@ void LoopAuto() {
 				UpdateDisplayComplete();
 				return;
 			}
+		}
+		break;
+	case AutoStateMovePostExtrudePause:
+		if (millis() >= postExtrudePauseTime) {
+			autoState = AutoStateMoveBackwardPostExtrude;
+			ignorePressureTime = millis() + COUP_BELIER_DELAY;
 		}
 		break;
 	case AutoStateMoveBackwardPostExtrude:
@@ -1564,7 +1571,10 @@ void AutoFirstRunHomePressureCallback() {
 void MaximumPositionReached() {
 	pistonPosition = maxPistonPosition;
 
-	autoState = AutoStateMoveBackwardPostExtrude;
+	if (autoState != AutoStateMovePostExtrudePause && autoState != AutoStateMoveBackwardPostExtrude) {
+		postExtrudePauseTime = millis() + POST_EXTRUDE_DELAY;
+		autoState = AutoStateMovePostExtrudePause;
+	}
 }
 
 void LeaveModeAuto() {
