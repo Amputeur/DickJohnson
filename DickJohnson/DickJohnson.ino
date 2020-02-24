@@ -156,7 +156,7 @@ enum Message {
 };
 
 const char* messages[MessageCount][MessageCount] = {
-	{" A BEbit Studio", "    MACHINE."},	//	MessageNone
+	{"      CDFMR","    MACHINE."},	//	MessageNone
 	{"Start the pump.", ""},	//	MessageErrorPumpNotStarted
 	{"Init the system", "first."},	//	MessageErrorSystemNotInitialized
 	{"Max pressure", "reached."},	//	MessageErrorExtrudePressure
@@ -303,6 +303,7 @@ long autoModeViceTimer = 0;
 bool displayStats = false;
 unsigned int thisJobRodCount = 0;
 bool autoModeHomeWasDown = false;
+bool autoModeSetLengthWasDown = false;
 
 unsigned long lastExtrudeTimes[STATS_AVERAGE_TIME_SAMPLING_COUNT] = {0ul};
 unsigned long lastWaitTimes[STATS_AVERAGE_TIME_SAMPLING_COUNT] = {0ul};
@@ -569,8 +570,8 @@ void loop() {
 
 			if (currentRodSizeIndex >= 0 && currentRodSizeIndex < SIZE_COUNT) {
 				displayStats = false;
-				thisJobRodCount = 0;
 				autoModeHomeWasDown = false;
+				autoModeSetLengthWasDown = false;
 
 				currentSamplingIndex = 0;
 				for (int i=0; i<STATS_AVERAGE_TIME_SAMPLING_COUNT; i++) {
@@ -1330,11 +1331,17 @@ void LoopAuto() {
 	}
 
 	bool home = PURead(IN_HOME);
+	bool setLength = PURead(IN_SET_EXTRUDE_LENGTH);
 
 	if (!autoModeHomeWasDown && home) {
-		displayStats = !displayStats;
+		thisJobRodCount = 0;
 	}
 	autoModeHomeWasDown = home;
+
+	if (!autoModeSetLengthWasDown && setLength) {
+		displayStats = !displayStats;
+	}
+	autoModeSetLengthWasDown = setLength;
 
 	if (displayStats) {
 		if (currentMessage != MessageAutoModeStats) {
