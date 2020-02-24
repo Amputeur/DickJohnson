@@ -92,17 +92,16 @@
 #define OUT_VICE_CLOSE 33
 #define OUT_VICE_CLOSE_LED 51
 
-#define OUT_DROP_OIL 35
-
 #define IN_PEDAL 38
 
 #define IN_START_PUMP 32
 #define IN_STOP_PUMP 40
 #define OUT_PUMP 37
 
-#define IN_COOLANT 30
-#define OUT_COOLANT 53
-#define OUT_COOLANT_LED 41
+#define IN_DROP_OIL 30
+#define OUT_DROP_OIL 35
+#define OUT_DROP_OIL_LED 41
+#define OUT_COOLANT_PUMP 53
 
 #define OUT_RELAY_ACTIVATOR 39
 
@@ -279,7 +278,7 @@ enum AutoState {
 	AutoStateWaitPedal,
 	AutoStateClosingVice,
 	AutoStateMoveBackwardForStopper,
-	AutoStateStopOil,
+	//AutoStateStopOil,
 	AutoStateRaiseStopper,
 	AutoStateMoveForwardExtrude,
 	AutoStateMovePostExtrudePause,
@@ -296,6 +295,7 @@ int autoModeStartPos;
 int autoModeBackPos;
 int autoModeRaiseStopperPos;
 int autoModeExtrudePos;
+int autoModeStopOilPos;
 int autoModeVicePressure;
 int autoModeExtrudePressure;
 
@@ -378,9 +378,9 @@ void setup() {
 	SetupRelay(OUT_VICE_OPEN, OUT_VICE_OPEN_LED);
 	SetupRelay(OUT_VICE_CLOSE, OUT_VICE_CLOSE_LED);
 
-	SetupRelay(OUT_DROP_OIL);
-	SetupPin(IN_COOLANT, true, true);
-	SetupRelay(OUT_COOLANT, OUT_COOLANT_LED);
+	SetupRelay(OUT_COOLANT_PUMP);
+	SetupPin(IN_DROP_OIL, true, true);
+	SetupRelay(OUT_DROP_OIL, OUT_DROP_OIL_LED);
 	
 	SetupPin(IN_START_PUMP, true, true);
 	SetupPin(IN_STOP_PUMP, true, true);
@@ -434,7 +434,6 @@ void loop() {
 			initialized = false;
 			pumpStarted = false;
 			RelayWrite(OUT_PUMP, false);
-			RelayWrite(OUT_COOLANT, false, OUT_COOLANT_LED);
 
 			currentMessage = MessagePANIC;
 			UpdateDisplayComplete();
@@ -482,7 +481,6 @@ void loop() {
 
 	//	Always keep this in sync.
 	digitalWrite(OUT_STOPPER_RAISED_LED, PURead(IN_STOP_RAISED));
-	RelayWrite(OUT_COOLANT, PURead(IN_COOLANT), OUT_COOLANT_LED);
 
 	if (ignorePressureTime < millis()) {
 		currentPressure = analogRead(IN_ANALOG_PRESSURE);
@@ -543,6 +541,8 @@ void loop() {
 			
 			prevRodSize = prevExtrudeLength = 0;
 			canReadRodSize = canReadExtrudeLength = false;
+
+			RelayWrite(OUT_COOLANT_PUMP, HIGH);
 		}
 		LoopManual();
 	} else if (!modeManual && modeAuto) {
@@ -556,7 +556,9 @@ void loop() {
 			isLearning = false;
 			isCoverOpenned = false;
 			autoModeViceTimer = 0ul;
-			
+
+			RelayWrite(OUT_COOLANT_PUMP, HIGH);
+
 			if (!PURead(IN_COVER)) {
 				coverOpennedTime = COVER_OPENNED_PAUSE_DELAY;
 			} else {
@@ -604,7 +606,8 @@ void StateChangeCleanup(bool leaveMode) {
 	RelayWrite(OUT_LOWER_STOP, false);
 	RelayWrite(OUT_VICE_OPEN, false, OUT_VICE_OPEN_LED);
 	RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
-	RelayWrite(OUT_DROP_OIL, false);
+	RelayWrite(OUT_DROP_OIL, false, OUT_DROP_OIL_LED);
+	RelayWrite(OUT_COOLANT_PUMP, false);
 
 	if (leaveMode) {
 		switch (currentMode) {
@@ -1109,6 +1112,8 @@ void LoopManual() {
 		UpdateViceManual();
 	}
 
+	RelayWrite(OUT_DROP_OIL, PURead(IN_DROP_OIL), OUT_DROP_OIL_LED);
+
 	UpdateDisplayComplete();
 
 	if (currentMessage == MessageConfigModeInitialized) {
@@ -1136,7 +1141,7 @@ void LoopManual() {
 }
 
 void LeaveModeManual() {
-
+	RelayWrite(OUT_COOLANT_PUMP, LOW);
 }
 
 void LoopAuto() {
@@ -1232,7 +1237,7 @@ void LoopAuto() {
 		}
 		break;
 	case AutoStateStartOil:
-		RelayWrite(OUT_DROP_OIL, true);
+		RelayWrite(OUT_DROP_OIL, true, OUT_DROP_OIL_LED);
 		autoState = AutoStateWaitPedal;
 
 		predalWasReleased = !PURead(IN_PEDAL);
@@ -1259,13 +1264,14 @@ void LoopAuto() {
 		break;
 	case AutoStateMoveBackwardForStopper:
 		if (GotoDestination(autoModeRaiseStopperPos, HIGH)) {
-			autoState = AutoStateStopOil;
+			autoState = AutoStateRaiseStopper;
 		}
 		break;
-	case AutoStateStopOil:
-		RelayWrite(OUT_DROP_OIL, false);
-		autoState = AutoStateRaiseStopper;
-		break;
+	//	DELETE ME
+	// case AutoStateStopOil:
+	// 	RelayWrite(OUT_DROP_OIL, false, OUT_DROP_OIL_LED);
+	// 	autoState = AutoStateRaiseStopper;
+	// 	break;
 	case AutoStateRaiseStopper:
 		if (MoveStopper(HIGH)) {
 			autoState = AutoStateMoveForwardExtrude;
@@ -1273,6 +1279,9 @@ void LoopAuto() {
 		}
 		break;
 	case AutoStateMoveForwardExtrude:
+		if (pistonPosition >= autoModeStopOilPos) {
+			RelayWrite(OUT_DROP_OIL, false, OUT_DROP_OIL_LED);
+		}
 		if (MoveStopper(HIGH) && GotoDestination(autoModeExtrudePos, LOW)) {
 			autoState = AutoStateMovePostExtrudePause;
 			postExtrudePauseTime = millis() + POST_EXTRUDE_DELAY;
@@ -1547,6 +1556,7 @@ void AutoFirstRunHomePressureCallback() {
 	autoModeRaiseStopperPos = autoModeStartPos - STOPPER_PADDING;
 	autoModeRaiseStopperPos = min(minPistonPosition + stopperSafePosition, autoModeRaiseStopperPos);
 	autoModeExtrudePos = maxPistonPosition + 1000;
+	autoModeStopOilPos = autoModeRaiseStopperPos + ((maxPistonPosition - autoModeRaiseStopperPos) * 0.5f);
 	autoModeVicePressure = extrusionTable[currentRodSizeIndex].viceMaxPressure;
 	autoModeExtrudePressure = extrusionTable[currentRodSizeIndex].extrudeMaxPressure;
 
@@ -1566,6 +1576,9 @@ void AutoFirstRunHomePressureCallback() {
 	Serial.print("autoModeExtrudePos: ");
 	Serial.print(((float)(maxPistonPosition - autoModeExtrudePos) / (float)positionMultiplicator));
 	Serial.print("\n");
+	Serial.print("autoModeStopOilPos: ");
+	Serial.print(((float)(maxPistonPosition - autoModeStopOilPos) / (float)positionMultiplicator));
+	Serial.print("\n");
 	Serial.print("autoModeVicePressure: ");
 	Serial.print(autoModeVicePressure);
 	Serial.print("\n");
@@ -1581,11 +1594,13 @@ void MaximumPositionReached() {
 	if (autoState != AutoStateMovePostExtrudePause && autoState != AutoStateMoveBackwardPostExtrude) {
 		postExtrudePauseTime = millis() + POST_EXTRUDE_DELAY;
 		autoState = AutoStateMovePostExtrudePause;
+
+		RelayWrite(OUT_DROP_OIL, false, OUT_DROP_OIL_LED);
 	}
 }
 
 void LeaveModeAuto() {
-
+	RelayWrite(OUT_COOLANT_PUMP, LOW);
 }
 
 //	Interrupts
