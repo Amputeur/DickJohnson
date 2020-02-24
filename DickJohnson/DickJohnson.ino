@@ -1932,14 +1932,19 @@ void LoadEEPROM() {
 			eeprom_read_block(&readJobCfg, (void*)readAdd, sizeof(currentJobConfig));
 
 			if (readJobCfg.jobID > loadedJobConfig.jobID) {
-				loadedJobConfig = readJobCfg;
-				
+				loadedJobConfig.jobID = readJobCfg.jobID;
+				loadedJobConfig.rodSize = readJobCfg.rodSize;
+				loadedJobConfig.extrudeLength = readJobCfg.extrudeLength;
+
 				highestJobRing = i;
 			}
 		}
 		jobConfigRingPosition = highestJobRing;
 
-		currentJobConfig = loadedJobConfig;
+		currentJobConfig.jobID = loadedJobConfig.jobID;
+		currentJobConfig.rodSize = loadedJobConfig.rodSize;
+		currentJobConfig.extrudeLength = loadedJobConfig.extrudeLength;
+
 		prevRodSize = currentJobConfig.rodSize;
 		prevExtrudeLength = currentJobConfig.extrudeLength;
 
