@@ -155,7 +155,7 @@ enum Message {
 	MessageCount,
 };
 
-char* messages[MessageCount][MessageCount] = {
+const char* messages[MessageCount][MessageCount] = {
 	{" A BEbit Studio", "    MACHINE."},	//	MessageNone
 	{"Start the pump.", ""},	//	MessageErrorPumpNotStarted
 	{"Init the system", "first."},	//	MessageErrorSystemNotInitialized
@@ -189,7 +189,7 @@ struct RodSizeParams {
 	float dieEntryNF;
 	unsigned int viceMaxPressure;
 	unsigned int extrudeMaxPressure;
-	char* name;
+	const char* name;
 };
 
 #define SIZE_COUNT 11
@@ -785,7 +785,7 @@ void Zeroing() {
 			if (stopperTimer == 0ul) {
 				stopperTimer = millis() + STOPPER_TIMER;
 			} else if (millis() >= stopperTimer) {
-				RelayWrite(OUT_LOWER_STOP, false);
+				//RelayWrite(OUT_LOWER_STOP, false);
 				initialized = true;
 				initState = InitStateWaiting;
 			}
@@ -842,7 +842,7 @@ void CalibrateStroke() {
 			RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
 			return;
 		} else {
-			RelayWrite(OUT_RAISE_STOP, false);
+			//RelayWrite(OUT_RAISE_STOP, false);
 			if (!PURead(OUT_VALVE_FORWARD)) {
 				RelayWrite(OUT_VALVE_FORWARD, true, OUT_VALVE_FORWARD_LED);
 				ignorePressureTime = millis() + COUP_BELIER_DELAY;
@@ -1088,7 +1088,7 @@ void LoopManual() {
 				stopperTimer = millis() + STOPPER_TIMER;
 			} else if (millis() >= stopperTimer) {
 				stopperToHigh = false;
-				RelayWrite(OUT_RAISE_STOP, false);
+				//RelayWrite(OUT_RAISE_STOP, false);
 				stopperTimer = 0ul;
 			}
 		}
@@ -1098,7 +1098,7 @@ void LoopManual() {
 				stopperTimer = millis() + STOPPER_TIMER;
 			} else if (millis() >= stopperTimer) {
 				stopperToLow = false;
-				RelayWrite(OUT_LOWER_STOP, false);
+				//RelayWrite(OUT_LOWER_STOP, false);
 				stopperTimer = 0ul;
 			}
 		}
@@ -1186,8 +1186,8 @@ void LoopAuto() {
 
 	if (stopperTimer != 0ul && millis() >= stopperTimer) {
 		stopperTimer = 0ul;
-		RelayWrite(OUT_RAISE_STOP, false);
-		RelayWrite(OUT_LOWER_STOP, false);
+		//RelayWrite(OUT_RAISE_STOP, false);
+		//RelayWrite(OUT_LOWER_STOP, false);
 	}
 
 	switch (autoState) {
@@ -1658,7 +1658,7 @@ void UpdateDisplayRodSize() {
 
 	int closestIndex = -1;
 	float closest = 999.0f;
-	char* result = "";
+	const char* result = "";
 	for (int i=0; i<SIZE_COUNT; i++) {
 		float dist = extrusionTable[i].size - fSize;
 		if (dist < 0.0f) {
@@ -2061,6 +2061,8 @@ void SaveJobConfig() {
 		Serial.print(currentJobConfig.rodSize);
 		Serial.print("\nLen: ");
 		Serial.print(currentJobConfig.extrudeLength);
+		Serial.print("\njobConfigRingPosition");
+		Serial.print(jobConfigRingPosition);
 		Serial.print("\n");
 #endif
 		eeprom_write_block((void*)&currentJobConfig, (void*)curAdd, sizeof(currentJobConfig));
@@ -2262,49 +2264,49 @@ void takeADump(char dumpType) {
 	}
 }
 
-void printSerialVariableI(char* variableName, int variableValue) {
+void printSerialVariableI(const char* variableName, int variableValue) {
 	Serial.print(variableName);
 	Serial.print(": ");
 	Serial.print(variableValue);
 	Serial.print("\n");
 }
 
-void printSerialVariableUI(char* variableName, unsigned int variableValue) {
+void printSerialVariableUI(const char* variableName, unsigned int variableValue) {
 	Serial.print(variableName);
 	Serial.print(": ");
 	Serial.print(variableValue);
 	Serial.print("\n");
 }
 
-void printSerialVariableUL(char* variableName, unsigned long variableValue) {
+void printSerialVariableUL(const char* variableName, unsigned long variableValue) {
 	Serial.print(variableName);
 	Serial.print(": ");
 	Serial.print(variableValue);
 	Serial.print("\n");
 }
 
-void printSerialVariableBYTE(char* variableName, byte variableValue) {
+void printSerialVariableBYTE(const char* variableName, byte variableValue) {
 	Serial.print(variableName);
 	Serial.print(": ");
 	Serial.print(variableValue);
 	Serial.print("\n");
 }
 
-void printSerialVariableB(char* variableName, bool variableValue) {
+void printSerialVariableB(const char* variableName, bool variableValue) {
 	Serial.print(variableName);
 	Serial.print(": ");
 	Serial.print(variableValue ? "TRUE" : "FALSE");
 	Serial.print("\n");
 }
 
-void printSerialVariableF(char* variableName, float variableValue) {
+void printSerialVariableF(const char* variableName, float variableValue) {
 	Serial.print(variableName);
 	Serial.print(": ");
 	Serial.print(variableValue);
 	Serial.print("\n");
 }
 
-void printSerialVariableJobConfig(char* variableName, JobConfig variableValue) {
+void printSerialVariableJobConfig(const char* variableName, JobConfig variableValue) {
 	Serial.print(variableName);
 	Serial.print("\n");
 	Serial.print("	jobID: ");
@@ -2318,7 +2320,7 @@ void printSerialVariableJobConfig(char* variableName, JobConfig variableValue) {
 	Serial.print("\n");
 }
 
-void printSerialVariableULArray(char* variableName, unsigned long variableValue[], int arrayLen) {
+void printSerialVariableULArray(const char* variableName, unsigned long variableValue[], int arrayLen) {
 	Serial.print(variableName);
 	Serial.print("\n");
 	for (int i=0; i<arrayLen; i++) {
@@ -2330,7 +2332,7 @@ void printSerialVariableULArray(char* variableName, unsigned long variableValue[
 	}
 }
 
-void printSerialVariableIArray(char* variableName, int variableValue[], int arrayLen) {
+void printSerialVariableIArray(const char* variableName, int variableValue[], int arrayLen) {
 	Serial.print(variableName);
 	Serial.print("\n");
 	for (int i=0; i<arrayLen; i++) {
