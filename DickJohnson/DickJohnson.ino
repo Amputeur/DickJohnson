@@ -44,6 +44,9 @@
 
 #define COVER_OPENNED_PAUSE_DELAY 100ul
 
+#define AUTO_LIBRICANT_EVERY_COUNT 50
+#define AUTO_LUBRICANT_DURATION 5000ul
+
 #define THREAD_NC true
 #define THREAD_NF false
 #define UNIT_MM true
@@ -102,6 +105,9 @@
 #define OUT_DROP_OIL 35
 #define OUT_DROP_OIL_LED 41
 #define OUT_COOLANT_PUMP 53
+
+//		TODO FIND A FREE RELAY OUTPUT
+#define OUT_AUTO_LUBRICANT 69
 
 #define OUT_RELAY_ACTIVATOR 39
 
@@ -299,6 +305,8 @@ int autoModeStopOilPos;
 int autoModeVicePressure;
 int autoModeExtrudePressure;
 
+unsigned long autoSlideLubricantStopTime = 0;
+
 long autoModeViceTimer = 0;
 bool displayStats = false;
 unsigned int thisJobRodCount = 0;
@@ -385,6 +393,8 @@ void setup() {
 	SetupPin(IN_START_PUMP, true, true);
 	SetupPin(IN_STOP_PUMP, true, true);
 	SetupRelay(OUT_PUMP);
+
+	SetupRelay(OUT_AUTO_LUBRICANT);
 
 	SetupPin(IN_PEDAL, true, true);
 
@@ -608,6 +618,7 @@ void StateChangeCleanup(bool leaveMode) {
 	RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
 	RelayWrite(OUT_DROP_OIL, false, OUT_DROP_OIL_LED);
 	RelayWrite(OUT_COOLANT_PUMP, false);
+	RelayWrite(OUT_AUTO_LUBRICANT, false);
 
 	if (leaveMode) {
 		switch (currentMode) {
@@ -1151,6 +1162,10 @@ void LoopAuto() {
 		return;
 	}
 
+	if (millis() >= autoSlideLubricantStopTime) {
+		RelayWrite(OUT_AUTO_LUBRICANT, false);
+	}
+
 	if (!pumpStarted) {
 		currentMessage = MessageErrorPumpNotStarted;
 		UpdateDisplayComplete();
@@ -1241,6 +1256,11 @@ void LoopAuto() {
 		autoState = AutoStateWaitPedal;
 
 		predalWasReleased = !PURead(IN_PEDAL);
+
+		if (thisJobRodCount % AUTO_LIBRICANT_EVERY_COUNT == 0) {
+			RelayWrite(OUT_AUTO_LUBRICANT, true);
+			autoSlideLubricantStopTime = millis() + AUTO_LUBRICANT_DURATION;
+		}
 		break;
 	case AutoStateWaitPedal:
 		if (PURead(IN_PEDAL)) {
