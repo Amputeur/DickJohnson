@@ -42,8 +42,6 @@
 #define COUP_BELIER_DELAY 90ul
 #define POST_EXTRUDE_DELAY 100ul
 
-#define COVER_OPENNED_PAUSE_DELAY 100ul
-
 #define AUTO_LIBRICANT_EVERY_COUNT 50
 #define AUTO_LUBRICANT_DURATION 5000ul
 
@@ -106,13 +104,11 @@
 #define OUT_DROP_OIL_LED 41
 #define OUT_COOLANT_PUMP 53
 
-//		TODO FIND A FREE RELAY OUTPUT
-#define OUT_AUTO_LUBRICANT 69
+#define OUT_AUTO_LUBRICANT 15
 
 #define OUT_RELAY_ACTIVATOR 39
 
 #define IN_PANIC 42
-#define IN_COVER 15
 
 #define IN_MAXIMUM_PISTON_POSITION 26
 
@@ -141,7 +137,6 @@ enum Message {
 	MessageErrorSystemNotInitialized,
 	MessageErrorExtrudePressure,
 	MessageErrorAutoModeGeneric,
-	MessageErrorCoverOpenned,
 	MessageConfigModePumpNotStarted,
 	MessageConfigModeNotInitialized,
 	MessageConfigModeMissingConfig,
@@ -166,7 +161,6 @@ const char* messages[MessageCount][MessageCount] = {
 	{"Init the system", "first."},	//	MessageErrorSystemNotInitialized
 	{"Max pressure", "reached."},	//	MessageErrorExtrudePressure
 	{"Error.", "Reset Auto Mode"}, 	//	MessageErrorAutoModeGeneric
-	{"Error.", "Close the cover."}, 	//	MessageErrorCoverOpenned
 	{"D:      L:", "Start the pump."},	//	MessageConfigModePumpNotStarted
 	{"D:      L:", "Press HOME"},	//	MessageConfigModeNotInitialized
 	{"D:      L:", "Missing Config"},	//	MessageConfigModeMissingConfig
@@ -236,7 +230,6 @@ bool pumpStarted = false;
 bool stopRaised = false;
 
 bool isPanicked = true;
-bool isCoverOpenned = false;
 bool initialized = false;
 
 UnitType unitType = UNIT_MM;
@@ -336,7 +329,6 @@ unsigned long postExtrudePauseTime = 0ul;
 bool waitingForHomePressure = false;
 
 unsigned long autoModeViceTimerDelta = 0ul;
-unsigned long coverOpennedTime = 0ul;
 
 #ifdef DEBUG_SERIAL
 unsigned long nextPistonPositionLogTime = 0;
@@ -398,7 +390,6 @@ void setup() {
 	SetupPin(IN_PEDAL, true, true);
 
 	SetupPin(IN_PANIC, true, true);
-	SetupPin(IN_COVER, true, true);
 
 	SetupPin(IN_MAXIMUM_PISTON_POSITION, true, true);
 
@@ -563,16 +554,9 @@ void loop() {
 			currentMode = ModeAuto;
 			autoState = AutoStateFirstRunGoHome;
 			isLearning = false;
-			isCoverOpenned = false;
 			autoModeViceTimer = 0ul;
 
 			RelayWrite(OUT_COOLANT_PUMP, HIGH);
-
-			if (!PURead(IN_COVER)) {
-				coverOpennedTime = COVER_OPENNED_PAUSE_DELAY;
-			} else {
-				coverOpennedTime = 0ul;
-			}
 
 			if (canReadRodSize || canReadExtrudeLength) {
 				detachInterrupt(CONFIG_ENCODER_A_INTERRUPT);
@@ -1170,33 +1154,6 @@ void LoopAuto() {
 		UpdateDisplayComplete();
 		autoState = AutoStateErrorPump;
 		return;
-	}
-
-	if (!PURead(IN_COVER)) {
-		if (coverOpennedTime == 0ul) {
-			coverOpennedTime = millis();
-		} else if (coverOpennedTime >= COVER_OPENNED_PAUSE_DELAY) {
-			if (!isCoverOpenned) {
-				isCoverOpenned = true;
-				StateChangeCleanup();
-
-				currentMessage = MessageErrorCoverOpenned;
-				UpdateDisplayComplete();
-
-				if (autoModeViceTimer != 0) {
-					autoModeViceTimerDelta = autoModeViceTimer - millis();
-				}
-			}
-			return;
-		}
-	} else if (isCoverOpenned) {
-		isCoverOpenned = false;
-
-		if (autoModeViceTimer != 0) {
-			autoModeViceTimer = millis() + autoModeViceTimerDelta;
-		}
-	} else if (coverOpennedTime != 0ul) {
-		coverOpennedTime = 0ul;
 	}
 
 	/*if (currentPressure >= MAX_PRESSURE) {
@@ -2217,7 +2174,6 @@ void takeADump(char dumpType) {
 		printSerialVariableB("pumpStarted", pumpStarted);
 		printSerialVariableB("stopRaised", stopRaised);
 		printSerialVariableB("isPanicked", isPanicked);
-		printSerialVariableB("isCoverOpenned", isCoverOpenned);
 		printSerialVariableB("initialized", initialized);
 		printSerialVariableB("unitType", unitType);
 		printSerialVariableB("threadType", threadType);
@@ -2271,7 +2227,6 @@ void takeADump(char dumpType) {
 		printSerialVariableUL("ignorePressureTime", ignorePressureTime);
 		printSerialVariableB("waitingForHomePressure", waitingForHomePressure);
 		printSerialVariableUL("autoModeViceTimerDelta", autoModeViceTimerDelta);
-		printSerialVariableUL("coverOpennedTime", coverOpennedTime);
 
 		printSerialVariableUL("nextPistonPositionLogTime", nextPistonPositionLogTime);
 		printSerialVariableUI("logPrevPistonPosition", logPrevPistonPosition);
