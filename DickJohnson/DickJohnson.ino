@@ -9,7 +9,7 @@
 #define EEPROM_VERSION_ADDRESS 0
 #define JOB_CONFIG_RING_COUNT 8
 #define ROD_COUNT_RING_COUNT  32
-#define STATS_AVERAGE_TIME_SAMPLING_COUNT 10
+#define STATS_AVERAGE_TIME_SAMPLING_COUNT 5
 
 #define MIN_ROD_SIZE 0.25f * ROD_SIZE_MULTIPLICATOR
 #define MAX_ROD_SIZE 1.25f * ROD_SIZE_MULTIPLICATOR
@@ -156,7 +156,7 @@ enum Message {
 };
 
 const char* messages[MessageCount][MessageCount] = {
-	{"      CDFMR","    MACHINE."},	//	MessageNone
+	{"     CDFMR","    MACHINE."},	//	MessageNone
 	{"Start the pump.", ""},	//	MessageErrorPumpNotStarted
 	{"Init the system", "first."},	//	MessageErrorSystemNotInitialized
 	{"Max pressure", "reached."},	//	MessageErrorExtrudePressure
@@ -173,7 +173,7 @@ const char* messages[MessageCount][MessageCount] = {
 	{"D:      L:", "Extr P: "},	//	MessageConfigModeCalibrateExtrudePressure
 	{"D:      L:", ""},	//	MessageConfigModeInitialized
 	{"D:      L:", "C:"},	//	MessageAutoModeRunning
-	{"TC:       A:", "C:        W:"},	//	MessageAutoModeStats
+	{"T:      A:", "C:      W:"},	//	MessageAutoModeStats
 	{"Emergency stop.", ""},	//	MessagePANIC
 };
 
@@ -1705,14 +1705,14 @@ void UpdateDisplayExtureLength() {
 }
 
 void UpdateDisplayCount() {
-	lcd.setCursor(3, 1);
+	lcd.setCursor(2, 1);
 	lcd.print(thisJobRodCount);
 }
 
 void UpdateDisplayStats() {
-	//	"TC:       A:",
-	//	"C:        W:"
-	lcd.setCursor(4, 0);
+	//	"T:      A:",
+	//	"C:      W:"
+	lcd.setCursor(2, 0);
 	lcd.print(rodCount);
 
 	//	Average time per extrude.
@@ -1724,18 +1724,8 @@ void UpdateDisplayStats() {
 			count++;
 		}
 	}
-	lcd.setCursor(13, 0);
-	if (count > 0) {
-		total = (total / (unsigned long)count) / 1000ul;
-		lcd.print(total);
-		if (total < 10) {
-			lcd.print("  ");
-		} else if (total < 100) {
-			lcd.print(" ");
-		}
-	} else {
-		lcd.print("0_0");
-	}
+	lcd.setCursor(10, 0);
+	printAverageTime(total, count);
 
 	//	Average time wasted.
 	total = 0;
@@ -1746,17 +1736,36 @@ void UpdateDisplayStats() {
 			count++;
 		}
 	}
-	lcd.setCursor(13, 1);
+	lcd.setCursor(10, 1);
+	printAverageTime(total, count);
+}
+
+void printAverageTime(int total, int count) {
 	if (count > 0) {
-		total = (total / (unsigned long)count) / 1000ul;
-		lcd.print(total);
-		if (total < 10) {
-			lcd.print("  ");
-		} else if (total < 100) {
-			lcd.print(" ");
+		total = (total / (unsigned long)count);
+		if (total > 99999) {
+			total = 99999;
 		}
+
+		int part = total / 1000ul;
+		if (part < 10) {
+			lcd.print('0');
+		}
+		lcd.print(part);
+
+		lcd.print(".");
+
+		part = total % 1000ul;
+		if (part < 100) {
+			if (part < 10) {
+				lcd.print("00");
+			} else {
+				lcd.print('0');
+			}
+		}
+		lcd.print(part);
 	} else {
-		lcd.print("0_0");
+		lcd.print("0____0");
 	}
 }
 
