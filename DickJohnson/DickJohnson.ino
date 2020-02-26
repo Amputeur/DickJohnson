@@ -284,7 +284,6 @@ enum AutoState {
 	AutoStateWaitPedal,
 	AutoStateClosingVice,
 	AutoStateMoveBackwardForStopper,
-	//AutoStateStopOil,
 	AutoStateRaiseStopper,
 	AutoStateMoveForwardExtrude,
 	AutoStateMovePostExtrudePause,
@@ -1254,7 +1253,7 @@ void LoopAuto() {
 	case AutoStateWaitPedal:
 		if (PURead(IN_PEDAL)) {
 			if (predalWasReleased) {
-				autoState = AutoStateStartOil;
+				autoState = AutoStateClosingVice;
 				ignorePressureTime = millis() + COUP_BELIER_DELAY;
 				lastWaitTimes[currentSamplingIndex] = millis() - refWaitTime;
 				if (displayStats) {
@@ -1263,15 +1262,6 @@ void LoopAuto() {
 			}
 		} else {
 			predalWasReleased = true;
-		}
-		break;
-	case AutoStateStartOil:
-		RelayWrite(OUT_DROP_OIL, true, OUT_DROP_OIL_LED);
-		autoState = AutoStateClosingVice;
-
-		if (thisJobRodCount % AUTO_LIBRICANT_EVERY_COUNT == 0) {
-			RelayWrite(OUT_AUTO_LUBRICANT, true);
-			autoSlideLubricantStopTime = millis() + AUTO_LUBRICANT_DURATION;
 		}
 		break;
 	case AutoStateClosingVice:
@@ -1285,15 +1275,19 @@ void LoopAuto() {
 			autoState = AutoStateRaiseStopper;
 		}
 		break;
-	//	DELETE ME
-	// case AutoStateStopOil:
-	// 	RelayWrite(OUT_DROP_OIL, false, OUT_DROP_OIL_LED);
-	// 	autoState = AutoStateRaiseStopper;
-	// 	break;
 	case AutoStateRaiseStopper:
 		if (MoveStopper(HIGH)) {
-			autoState = AutoStateMoveForwardExtrude;
+			autoState = AutoStateStartOil;
 			ignorePressureTime = millis() + COUP_BELIER_DELAY;
+		}
+		break;
+	case AutoStateStartOil:
+		RelayWrite(OUT_DROP_OIL, true, OUT_DROP_OIL_LED);
+		autoState = AutoStateMoveForwardExtrude;
+
+		if (thisJobRodCount % AUTO_LIBRICANT_EVERY_COUNT == 0) {
+			RelayWrite(OUT_AUTO_LUBRICANT, true);
+			autoSlideLubricantStopTime = millis() + AUTO_LUBRICANT_DURATION;
 		}
 		break;
 	case AutoStateMoveForwardExtrude:
@@ -1574,7 +1568,8 @@ void AutoFirstRunHomePressureCallback() {
 	autoModeRaiseStopperPos = autoModeStartPos - STOPPER_PADDING;
 	autoModeRaiseStopperPos = min(minPistonPosition + stopperSafePosition, autoModeRaiseStopperPos);
 	autoModeExtrudePos = maxPistonPosition + 1000;
-	autoModeStopOilPos = maxPistonPosition - (int)(0.75f * (float)positionMultiplicator);
+	autoModeStopOilPos = maxPistonPosition - (int)(1.50f * (float)positionMultiplicator);
+	//autoModeStopOilPos = autoModeRaiseStopperPos + ((maxPistonPosition - autoModeRaiseStopperPos) * 0.5f);
 	autoModeVicePressure = extrusionTable[currentRodSizeIndex].viceMaxPressure;
 	autoModeExtrudePressure = extrusionTable[currentRodSizeIndex].extrudeMaxPressure;
 
