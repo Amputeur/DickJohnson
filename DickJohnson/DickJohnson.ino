@@ -1313,6 +1313,7 @@ void LoopAuto() {
 
 	if (!autoModeHomeWasDown && home) {
 		thisJobRodCount = 0;
+		UpdateDisplayCount();
 	}
 	autoModeHomeWasDown = home;
 
