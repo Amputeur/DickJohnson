@@ -2089,9 +2089,9 @@ int GetRodCountEEPROM_Address() {
 
 void SaveJobConfig() {
 #ifdef ENABLE_SAVE_TO_EEPROM
-	if (loadedJobConfig.rodSize != currentJobConfig.rodSize &&
-		loadedJobConfig.extrudeLength != currentJobConfig.extrudeLength &&
-		saveDataVersion == SAVE_DATA_VERSION) {
+	if (loadedJobConfig.rodSize != currentJobConfig.rodSize ||
+		loadedJobConfig.extrudeLength != currentJobConfig.extrudeLength ||
+		saveDataVersion != SAVE_DATA_VERSION) {
 
 		currentJobConfig.jobID++;
 
