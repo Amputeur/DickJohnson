@@ -15,3 +15,4 @@
 
 - **Home**: Reset compteur.
 - **Set Thread Length**: Montrer les stats plus complètes.
+- **Close Vice**: Montrer la pression en temps réel.
