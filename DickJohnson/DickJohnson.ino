@@ -1139,7 +1139,7 @@ void LeaveModeManual() {
 }
 
 void LoopAuto() {
-	if (pistonStrokeLength == 0 || stopperSafePosition == 0) {
+	if (!initialized || pistonStrokeLength == 0 || stopperSafePosition == 0) {
 		currentMessage = MessageErrorSystemNotInitialized;
 		UpdateDisplayComplete();
 		return;
