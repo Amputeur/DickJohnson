@@ -1252,12 +1252,14 @@ void LoopAuto() {
 			RelayWrite(OUT_DROP_OIL, false, OUT_DROP_OIL_LED);
 		}
 		if (MoveStopper(HIGH) && GotoDestination(autoModeExtrudePos, LOW)) {
+			RelayWrite(OUT_DROP_OIL, false, OUT_DROP_OIL_LED);	//	Force stop in case it wasn't...
 			autoState = AutoStateMovePostExtrudePause;
 			postExtrudePauseTime = millis() + POST_EXTRUDE_DELAY;
 		} else {
 			if (currentPressure > autoModeExtrudePressure) {
 				RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
 				RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
+				RelayWrite(OUT_DROP_OIL, false, OUT_DROP_OIL_LED);
 				autoState = AutoStateErrorExtrudePressure;
 				currentMessage = MessageErrorExtrudePressure;
 				UpdateDisplayComplete();
@@ -1526,8 +1528,10 @@ void AutoFirstRunHomePressureCallback() {
 	autoModeRaiseStopperPos = autoModeStartPos - STOPPER_PADDING;
 	autoModeRaiseStopperPos = min(minPistonPosition + stopperSafePosition, autoModeRaiseStopperPos);
 	autoModeExtrudePos = maxPistonPosition + 1000;
-	autoModeStopOilPos = maxPistonPosition - (int)(1.50f * (float)positionMultiplicator);
-	//autoModeStopOilPos = autoModeRaiseStopperPos + ((maxPistonPosition - autoModeRaiseStopperPos) * 0.5f);
+	autoModeStopOilPos = min(
+		maxPistonPosition - (int)(1.50f * (float)positionMultiplicator),
+		autoModeRaiseStopperPos + ((maxPistonPosition - autoModeRaiseStopperPos) * 0.5f)
+	);
 	autoModeVicePressure = extrusionTable[currentRodSizeIndex].viceMaxPressure;
 	autoModeExtrudePressure = extrusionTable[currentRodSizeIndex].extrudeMaxPressure;
 
