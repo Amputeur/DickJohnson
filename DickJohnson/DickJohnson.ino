@@ -1211,7 +1211,7 @@ void LoopAuto() {
 		if (PURead(IN_PEDAL)) {
 			if (predalWasReleased) {
 				autoState = AutoStateClosingVice;
-				ignorePressureTime = millis() + COUP_BELIER_DELAY;
+				ignorePressureTime = millis() + (unsigned long)viceRaiseTimer;
 				lastWaitTimes[currentSamplingIndex] = millis() - refWaitTime;
 				if (displayStats) {
 					UpdateDisplayStats();
