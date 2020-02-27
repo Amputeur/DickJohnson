@@ -150,6 +150,7 @@ enum Message {
 	MessageConfigModeInitialized,
 	MessageAutoModeRunning,
 	MessageAutoModeStats,
+	MessageAutoModePressure,
 	MessagePANIC,
 
 	MessageCount,
@@ -174,6 +175,7 @@ const char* messages[MessageCount][MessageCount] = {
 	{"D:      L:", ""},	//	MessageConfigModeInitialized
 	{"D:      L:", "C:"},	//	MessageAutoModeRunning
 	{"T:      A:", "C:      W:"},	//	MessageAutoModeStats
+	{"D:      L:", "C:      P:"},	//	MessageAutoModePressure
 	{"Emergency stop.", ""},	//	MessagePANIC
 };
 
@@ -301,9 +303,11 @@ unsigned long autoSlideLubricantStopTime = 0;
 
 long autoModeViceTimer = 0;
 bool displayStats = false;
+bool displayPressure = false;
 unsigned int thisJobRodCount = 0;
 bool autoModeHomeWasDown = false;
 bool autoModeSetLengthWasDown = false;
+bool autoModeCloseViceWasDown = false;
 
 unsigned long lastExtrudeTimes[STATS_AVERAGE_TIME_SAMPLING_COUNT] = {0ul};
 unsigned long lastWaitTimes[STATS_AVERAGE_TIME_SAMPLING_COUNT] = {0ul};
@@ -565,8 +569,10 @@ void loop() {
 
 			if (currentRodSizeIndex >= 0 && currentRodSizeIndex < SIZE_COUNT) {
 				displayStats = false;
+				displayPressure = false;
 				autoModeHomeWasDown = false;
 				autoModeSetLengthWasDown = false;
+				autoModeCloseViceWasDown = false;
 
 				currentSamplingIndex = 0;
 				for (int i=0; i<STATS_AVERAGE_TIME_SAMPLING_COUNT; i++) {
@@ -1312,6 +1318,7 @@ void LoopAuto() {
 
 	bool home = PURead(IN_HOME);
 	bool setLength = PURead(IN_SET_EXTRUDE_LENGTH);
+	bool closeVice = PURead(IN_MANUAL_CLOSE_VICE);
 
 	if (!autoModeHomeWasDown && home) {
 		thisJobRodCount = 0;
@@ -1321,8 +1328,20 @@ void LoopAuto() {
 
 	if (!autoModeSetLengthWasDown && setLength) {
 		displayStats = !displayStats;
+		if (displayStats) {
+			displayPressure = false;
+		}
 	}
 	autoModeSetLengthWasDown = setLength;
+
+	if (!autoModeCloseViceWasDown && closeVice) {
+		displayPressure = !displayPressure;
+
+		if (displayPressure) {
+			displayStats = false;
+		}
+	}
+	autoModeCloseViceWasDown = closeVice;
 
 	if (displayStats) {
 		if (currentMessage != MessageAutoModeStats) {
@@ -1331,6 +1350,16 @@ void LoopAuto() {
 			UpdateDisplayStats();
 			UpdateDisplayCount();
 		}
+	} else if (displayPressure) {
+		if (currentMessage != MessageAutoModePressure) {
+			currentMessage = MessageAutoModePressure;
+			UpdateDisplayComplete();
+			UpdateDisplayRodSize();
+			UpdateDisplayExtureLength();
+			UpdateDisplayCount();
+		}
+
+		UpdateDisplayCurrentPressure();
 	} else {
 		if (currentMessage != MessageAutoModeRunning) {
 			currentMessage = MessageAutoModeRunning;
@@ -1774,6 +1803,23 @@ void printAverageTime(int total, int count) {
 	}
 }
 
+void UpdateDisplayCurrentPressure() {
+	//	"C:      P:"
+
+	lcd.setCursor(10, 1);
+
+	int pressure = analogRead(IN_ANALOG_PRESSURE) * PRESSURE_ANALOG_TO_PSI;
+	lcd.print(pressure);
+
+	if (pressure < 10) {
+		lcd.print("   ");
+	} else if (pressure < 100) {
+		lcd.print("  ");
+	} else if (pressure < 1000) {
+		lcd.print(' ');
+	}
+}
+
 void UpdateDisplayViceRaiseTime() {
 	//	"Raise Time: "
 	lcd.setCursor(12, 1);
@@ -2101,7 +2147,9 @@ void IncrementCount() {
 #endif
 	}
 
-	if (currentMessage == MessageAutoModeRunning || currentMessage == MessageAutoModeStats) {
+	if (currentMessage == MessageAutoModeRunning
+	|| currentMessage == MessageAutoModeStats
+	|| currentMessage == MessageAutoModePressure) {
 		UpdateDisplayCount();
 		if (displayStats) {
 			UpdateDisplayStats();
@@ -2192,6 +2240,7 @@ void takeADump(char dumpType) {
 		printSerialVariableB("unitType", unitType);
 		printSerialVariableB("threadType", threadType);
 		printSerialVariableB("displayStats", displayStats);
+		printSerialVariableB("displayPressure", displayPressure);
 	}
 
 	//	Piston
