@@ -1319,29 +1319,34 @@ void LoopAuto() {
 		return;
 	}
 
+	//	Reset current job count.
 	bool home = PURead(IN_HOME);
-	bool setLength = PURead(IN_SET_EXTRUDE_LENGTH);
-	bool closeVice = PURead(IN_MANUAL_CLOSE_VICE);
-
 	if (!autoModeHomeWasDown && home) {
 		thisJobRodCount = 0;
 		UpdateDisplayCount();
 	}
 	autoModeHomeWasDown = home;
 
+	//	Display extended stats.
+	bool setLength = PURead(IN_SET_EXTRUDE_LENGTH);
 	if (!autoModeSetLengthWasDown && setLength) {
-		displayStats = !displayStats;
 		if (displayStats) {
+			displayStats = false;
+		} else {
+			displayStats = true;
 			displayPressure = false;
 		}
 	}
 	autoModeSetLengthWasDown = setLength;
 
+	//	Display current hydraulic pressure.
+	bool closeVice = PURead(IN_MANUAL_CLOSE_VICE);
 	if (!autoModeCloseViceWasDown && closeVice) {
-		displayPressure = !displayPressure;
-
 		if (displayPressure) {
+			displayPressure = false;
+		} else {
 			displayStats = false;
+			displayPressure = true;
 		}
 	}
 	autoModeCloseViceWasDown = closeVice;
