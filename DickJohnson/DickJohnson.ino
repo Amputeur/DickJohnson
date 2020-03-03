@@ -445,7 +445,6 @@ void loop() {
 			UpdateDisplayComplete();
 
 			currentMode = ModeNone;
-			return;
 		} else {
 
 		}
