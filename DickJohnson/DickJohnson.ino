@@ -334,6 +334,8 @@ bool waitingForHomePressure = false;
 
 unsigned long autoModeViceTimerDelta = 0ul;
 
+int prevPistonPosition = 0;
+
 #ifdef DEBUG_SERIAL
 unsigned long nextPistonPositionLogTime = 0;
 unsigned int logPrevPistonPosition = 0;
@@ -542,6 +544,7 @@ void loop() {
 			manualViceOpenPressTime = -1;
 			manualViceClosePressTime = -1;
 			toggleStopperPressTime = -1;
+			prevPistonPosition = -1;
 			
 			prevRodSize = prevExtrudeLength = 0;
 			canReadRodSize = canReadExtrudeLength = false;
@@ -1081,8 +1084,6 @@ void UpdateViceManual() {
 		RelayWrite(OUT_VICE_CLOSE, false, OUT_VICE_CLOSE_LED);
 	}
 }
-
-int prevPistonPosition = 0;
 
 void LoopManual() {
 	currentMessage = MessageConfigModeInitialized;
