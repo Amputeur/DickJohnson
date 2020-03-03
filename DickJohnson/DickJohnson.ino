@@ -609,6 +609,9 @@ void StateChangeCleanup(bool leaveMode) {
 	RelayWrite(OUT_COOLANT_PUMP, false);
 	RelayWrite(OUT_AUTO_LUBRICANT, false);
 
+	lastMessage = currentMessage = MessageNone;
+	lcd.clear();
+
 	if (leaveMode) {
 		switch (currentMode) {
 		case ModeInit:
