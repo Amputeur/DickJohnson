@@ -248,6 +248,7 @@ unsigned int maxPistonPosition = 0;
 unsigned int viceRaiseTimer = 250;
 
 int currentPressure = 0;
+int logMaxEtrusionPressure = 0;
 
 int initModeHomeCount = 0;
 unsigned long homePressTime = -1;
@@ -335,6 +336,7 @@ bool waitingForHomePressure = false;
 unsigned long autoModeViceTimerDelta = 0ul;
 
 int prevPistonPosition = 0;
+int prevLogMaxEtrusionPressure = 0;
 
 #ifdef DEBUG_SERIAL
 unsigned long nextPistonPositionLogTime = 0;
@@ -1250,6 +1252,7 @@ void LoopAuto() {
 	case AutoStateStartOil:
 		RelayWrite(OUT_DROP_OIL, true, OUT_DROP_OIL_LED);
 		autoState = AutoStateMoveForwardExtrude;
+		logMaxEtrusionPressure = 0;
 
 		if (thisJobRodCount % AUTO_LIBRICANT_EVERY_COUNT == 0) {
 			RelayWrite(OUT_AUTO_LUBRICANT, true);
@@ -1265,6 +1268,10 @@ void LoopAuto() {
 			autoState = AutoStateMovePostExtrudePause;
 			postExtrudePauseTime = millis() + POST_EXTRUDE_DELAY;
 		} else {
+			if (currentPressure > logMaxEtrusionPressure) {
+				logMaxEtrusionPressure = currentPressure;
+			}
+
 			if (currentPressure > autoModeExtrudePressure) {
 				RelayWrite(OUT_VALVE_BACKWARD, false, OUT_VALVE_BACKWARD_LED);
 				RelayWrite(OUT_VALVE_FORWARD, false, OUT_VALVE_FORWARD_LED);
@@ -1365,6 +1372,8 @@ void LoopAuto() {
 			UpdateDisplayRodSize();
 			UpdateDisplayExtureLength();
 			UpdateDisplayCount();
+
+			prevLogMaxEtrusionPressure = -1;
 		}
 
 		UpdateDisplayCurrentPressure();
@@ -1559,7 +1568,7 @@ void AutoFirstRunHomePressureCallback() {
 	}
 
 	float realLen = (float)currentJobConfig.extrudeLength/(float)EXTRUDE_LENGTH_MULTIPLICATOR;
-	autoModeStartPos = maxPistonPosition - (int)((realLen / (1.0f/len)) * (float)positionMultiplicator) - STOPPER_THICKNESS - (int)(dieEntry * positionMultiplicator);
+	autoModeStartPos = maxPistonPosition - (int)((realLen * len) * (float)positionMultiplicator) - STOPPER_THICKNESS - (int)(dieEntry * positionMultiplicator);
 	autoModeBackPos = maxPistonPosition - (int)(realLen * (float)positionMultiplicator) - STOPPER_THICKNESS - STOPPER_PADDING - (int)(dieEntry * positionMultiplicator);
 	autoModeBackPos = min(minPistonPosition + stopperSafePosition, autoModeBackPos);
 	autoModeRaiseStopperPos = autoModeStartPos - STOPPER_PADDING;
@@ -1592,10 +1601,10 @@ void AutoFirstRunHomePressureCallback() {
 	Serial.print(((float)(maxPistonPosition - autoModeStopOilPos) / (float)positionMultiplicator));
 	Serial.print("\n");
 	Serial.print("autoModeVicePressure: ");
-	Serial.print(autoModeVicePressure);
+	Serial.print(autoModeVicePressure * PRESSURE_ANALOG_TO_PSI);
 	Serial.print("\n");
 	Serial.print("autoModeExtrudePressure: ");
-	Serial.print(autoModeExtrudePressure);
+	Serial.print(autoModeExtrudePressure * PRESSURE_ANALOG_TO_PSI);
 	Serial.print("\n");
 #endif
 }
@@ -1814,9 +1823,13 @@ void printAverageTime(int total, int count) {
 void UpdateDisplayCurrentPressure() {
 	//	"C:      P:"
 
+	if (prevLogMaxEtrusionPressure == logMaxEtrusionPressure) {
+		return;
+	}
+
 	lcd.setCursor(10, 1);
 
-	int pressure = analogRead(IN_ANALOG_PRESSURE) * PRESSURE_ANALOG_TO_PSI;
+	int pressure = logMaxEtrusionPressure * PRESSURE_ANALOG_TO_PSI;
 	lcd.print(pressure);
 
 	if (pressure < 10) {
@@ -2288,8 +2301,8 @@ void takeADump(char dumpType) {
 		printSerialVariableI("autoModeBackPos", autoModeBackPos);
 		printSerialVariableI("autoModeRaiseStopperPos", autoModeRaiseStopperPos);
 		printSerialVariableI("autoModeExtrudePos", autoModeExtrudePos);
-		printSerialVariableI("autoModeVicePressure", autoModeVicePressure);
-		printSerialVariableI("autoModeExtrudePressure", autoModeExtrudePressure);
+		printSerialVariableI("autoModeVicePressure", autoModeVicePressure * PRESSURE_ANALOG_TO_PSI);
+		printSerialVariableI("autoModeExtrudePressure", autoModeExtrudePressure * PRESSURE_ANALOG_TO_PSI);
 		printSerialVariableI("autoModeViceTimer", autoModeViceTimer);
 		printSerialVariableUI("thisJobRodCount", thisJobRodCount);
 		printSerialVariableB("autoModeHomeWasDown", autoModeHomeWasDown);
