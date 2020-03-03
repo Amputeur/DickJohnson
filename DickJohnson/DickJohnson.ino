@@ -1560,7 +1560,7 @@ void AutoFirstRunHomePressureCallback() {
 	autoModeRaiseStopperPos = autoModeStartPos - STOPPER_PADDING;
 	autoModeRaiseStopperPos = min(minPistonPosition + stopperSafePosition, autoModeRaiseStopperPos);
 	autoModeExtrudePos = maxPistonPosition + 1000;
-	autoModeStopOilPos = min(
+	autoModeStopOilPos = max(
 		maxPistonPosition - (int)(1.50f * (float)positionMultiplicator),
 		autoModeRaiseStopperPos + ((maxPistonPosition - autoModeRaiseStopperPos) * 0.5f)
 	);
