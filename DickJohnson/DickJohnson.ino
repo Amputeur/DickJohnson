@@ -405,9 +405,6 @@ void setup() {
 	Serial.begin(9600);
 #endif
 
-	//	Read from an unused Analog pin to use electrical noise as seed.
-	randomSeed(analogRead(15));
-
 	LoadEEPROM();
 
 	digitalWrite(OUT_RELAY_ACTIVATOR, true);
@@ -1995,6 +1992,9 @@ void LoadEEPROM() {
 
 		rodCount = 0ul;
 		unsigned int rodCountI = 0u;
+		unsigned int smallestRodCountI = -1;
+		rodCountRingPosition = 0;
+
 #ifdef DEBUG_SERIAL
 		Serial.print("Rod Count Rings: ");
 #endif
@@ -2002,6 +2002,11 @@ void LoadEEPROM() {
 			rodCountI = eeprom_read_word((unsigned int*)(curAdd + sizeof(rodCountI)*i));
 
 			rodCount += (long)rodCountI;
+
+			if (rodCountI < smallestRodCountI) {
+				smallestRodCountI = rodCountI;
+				rodCountRingPosition = i;
+			}
 
 #ifdef DEBUG_SERIAL
 			Serial.print(i);
@@ -2011,12 +2016,12 @@ void LoadEEPROM() {
 #endif
 		}
 
-		rodCountRingPosition = random(0, ROD_COUNT_RING_COUNT);
-
 #ifdef DEBUG_SERIAL
 		Serial.print("\nLifetime Rod Count: ");
 		Serial.print(rodCount);
-		Serial.print("\n");
+		Serial.print("\nrodCountRingPosition: ");
+		Serial.print(rodCountRingPosition);
+		Serial.print('\n');
 #endif
 	}
 
