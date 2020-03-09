@@ -1788,7 +1788,7 @@ void UpdateDisplayStats() {
 	printAverageTime(total, count);
 }
 
-void printAverageTime(int total, int count) {
+void printAverageTime(long total, int count) {
 	if (count > 0) {
 		total = (total / (unsigned long)count);
 		if (total > 99999) {
