@@ -40,7 +40,6 @@
 #define LEARNING_DELAY 100ul
 
 #define COUP_BELIER_DELAY 90ul
-#define POST_EXTRUDE_DELAY 100ul
 
 #define AUTO_LIBRICANT_EVERY_COUNT 50
 #define AUTO_LUBRICANT_DURATION 5000ul
@@ -128,6 +127,7 @@ enum InitState {
 	InitStateCalibrateViceRaiseTime,
 	InitStateCalibrateVicePressure,
 	InitStateCalibrateExtrudePressure,
+	InitStateCalibratePostExtrudeDelay,
 };
 InitState initState = InitStateWaiting;
 
@@ -147,6 +147,7 @@ enum Message {
 	MessageConfigModeCalibrateViceRaiseTimer,
 	MessageConfigModeCalibrateVicePressure,
 	MessageConfigModeCalibrateExtrudePressure,
+	MessageConfigModeCalibratePostExtrudeDelay,
 	MessageConfigModeInitialized,
 	MessageAutoModeRunning,
 	MessageAutoModeStats,
@@ -172,6 +173,7 @@ const char* messages[MessageCount][MessageCount] = {
 	{"D:      L:", "Raise Time: "},	//	MessageConfigModeCalibrateViceRaiseTimer
 	{"D:      L:", "Vice P: "},	//	MessageConfigModeCalibrateVicePressure
 	{"D:      L:", "Extr P: "},	//	MessageConfigModeCalibrateExtrudePressure
+	{"D:      L:", "Post Delay: "},	//	MessageConfigModeCalibratePostExtrudeDelay
 	{"D:      L:", ""},	//	MessageConfigModeInitialized
 	{"D:      L:", "C:"},	//	MessageAutoModeRunning
 	{"T:      A:", "C:      W:"},	//	MessageAutoModeStats
@@ -246,6 +248,7 @@ unsigned int stopperSafePosition = 0;
 unsigned int minPistonPosition = 0;
 unsigned int maxPistonPosition = 0;
 unsigned int viceRaiseTimer = 250;
+unsigned int postExtrudeDelay = 100;
 
 int currentPressure = 0;
 int logMaxEtrusionPressure = 0;
@@ -655,6 +658,9 @@ void LoopInit() {
 		case InitStateCalibrateExtrudePressure:
 			currentMessage = MessageConfigModeCalibrateExtrudePressure;
 			break;
+		case InitStateCalibratePostExtrudeDelay:
+			currentMessage = MessageConfigModeCalibratePostExtrudeDelay;
+			break;
 		}
 	} else if (initialized) {
 		if (pistonStrokeLength == 0 || stopperSafePosition == 0) {
@@ -686,6 +692,9 @@ void LoopInit() {
 		return;
 	case InitStateCalibrateExtrudePressure:
 		CalibrateExtrudePressure();
+		return;
+	case InitStateCalibratePostExtrudeDelay:
+		CalibratePostExtrudeDelay();
 		return;
 	default:
 		InitWaitInput();
@@ -738,6 +747,19 @@ void InitWaitInput() {
 			canReadExtrudeLength = false;
 
 			attachInterrupt(CONFIG_ENCODER_A_INTERRUPT, UpdateExtrudePressure, CHANGE);
+		}
+	} else if(PURead(IN_MANUAL_PISTON_BACKWARD)) {
+		if (calibrateVicePressTime == -1) {
+			calibrateVicePressTime = millis();
+		}
+		if ((millis() - calibrateVicePressTime) > RECALIBRATE_HOLD_TIME && initState != InitStateCalibratePostExtrudeDelay) {
+			calibrateVicePressTime = -1;
+			initState = InitStateCalibratePostExtrudeDelay;
+			detachInterrupt(CONFIG_ENCODER_A_INTERRUPT);
+			canReadRodSize = false;
+			canReadExtrudeLength = false;
+
+			attachInterrupt(CONFIG_ENCODER_A_INTERRUPT, UpdatePostExtrudeDelay, CHANGE);
 		}
 	} else if (PURead(IN_HOME)) {
 		if (homePressTime == -1) {
@@ -932,6 +954,20 @@ void CalibrateExtrudePressure() {
 		SaveSystemSettings();
 	}
 }
+
+void CalibratePostExtrudeDelay() {
+	if (PURead(IN_MANUAL_PISTON_BACKWARD)) {
+		UpdateDisplayRodSize();
+		UpdateDisplayExtureLength();
+		UpdateDisplayPostExtrudeDelay();
+	} else {
+		initState = InitStateWaiting;
+		detachInterrupt(CONFIG_ENCODER_A_INTERRUPT);
+
+		SaveSystemSettings();
+	}
+}
+
 
 void ReadConfig() {
 	UnitType setUnit = PURead(IN_UNIT_SELECTOR);
@@ -1264,7 +1300,7 @@ void LoopAuto() {
 		if (MoveStopper(HIGH) && GotoDestination(autoModeExtrudePos, LOW)) {
 			RelayWrite(OUT_DROP_OIL, false, OUT_DROP_OIL_LED);	//	Force stop in case it wasn't...
 			autoState = AutoStateMovePostExtrudePause;
-			postExtrudePauseTime = millis() + POST_EXTRUDE_DELAY;
+			postExtrudePauseTime = millis() + postExtrudeDelay;
 		} else {
 			if (currentPressure > logMaxEtrusionPressure) {
 				logMaxEtrusionPressure = currentPressure;
@@ -1614,7 +1650,7 @@ void MaximumPositionReached() {
 	pistonPosition = maxPistonPosition;
 
 	if (autoState != AutoStateMovePostExtrudePause && autoState != AutoStateMoveBackwardPostExtrude) {
-		postExtrudePauseTime = millis() + POST_EXTRUDE_DELAY;
+		postExtrudePauseTime = millis() + postExtrudeDelay;
 		autoState = AutoStateMovePostExtrudePause;
 
 		RelayWrite(OUT_DROP_OIL, false, OUT_DROP_OIL_LED);
@@ -1671,6 +1707,14 @@ void UpdateExtrudePressure() {
 		extrusionTable[currentRodSizeIndex].extrudeMaxPressure = min(extrusionTable[currentRodSizeIndex].extrudeMaxPressure + 1, 1024);
 	} else {
 		extrusionTable[currentRodSizeIndex].extrudeMaxPressure = max(extrusionTable[currentRodSizeIndex].extrudeMaxPressure - 1, 1);
+	}
+}
+
+void UpdatePostExtrudeDelay() {
+	if (digitalRead(CONFIG_ENCODER_A) != digitalRead(CONFIG_ENCODER_B)) {
+		postExtrudeDelay = postExtrudeDelay + 1;
+	} else {
+		postExtrudeDelay = max(postExtrudeDelay - 1, 0);
 	}
 }
 
@@ -1860,6 +1904,13 @@ void UpdateDisplayExtrudePressure() {
 	//	"Extr P: "
 	lcd.setCursor(8, 1);
 	lcd.print(extrusionTable[currentRodSizeIndex].extrudeMaxPressure * PRESSURE_ANALOG_TO_PSI);
+	lcd.print("   ");
+}
+
+void UpdateDisplayPostExtrudeDelay() {
+	//	"Post Delay: "
+	lcd.setCursor(12, 1);
+	lcd.print(postExtrudeDelay);
 	lcd.print("   ");
 }
 
