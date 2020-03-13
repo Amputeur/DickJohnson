@@ -316,7 +316,7 @@ unsigned int currentSamplingIndex = 0;
 unsigned long refWaitTime = 0;
 unsigned long refExtrudeTime = 0;
 
-bool predalWasReleased = false;
+bool pedalWasReleased = false;
 
 bool isLearning = false;
 int learningDirection = 0;
@@ -1217,7 +1217,8 @@ void LoopAuto() {
 		break;
 	case AutoStateWaitPedal:
 		if (PURead(IN_PEDAL)) {
-			if (predalWasReleased) {
+			if (pedalWasReleased) {
+				pedalWasReleased = false;
 				autoState = AutoStateClosingVice;
 				ignorePressureTime = millis() + COUP_BELIER_DELAY;
 				lastWaitTimes[currentSamplingIndex] = millis() - refWaitTime;
@@ -1226,7 +1227,7 @@ void LoopAuto() {
 				}
 			}
 		} else {
-			predalWasReleased = true;
+			pedalWasReleased = true;
 		}
 		break;
 	case AutoStateClosingVice:
@@ -1306,6 +1307,9 @@ void LoopAuto() {
 		}
 		break;
 	case AutoStateMoveForwardToStartPos:
+		if (!pedalWasReleased && PURead(IN_PEDAL)) {
+			pedalWasReleased = true;
+		}
 		if (GotoDestination(autoModeStartPos, LOW)) {
 			autoState = AutoStateWaitPedal;
 
@@ -2320,7 +2324,7 @@ void takeADump(char dumpType) {
 		printSerialVariableUL("nextPistonPositionLogTime", nextPistonPositionLogTime);
 		printSerialVariableUI("logPrevPistonPosition", logPrevPistonPosition);
 
-		printSerialVariableB("predalWasReleased", predalWasReleased);
+		printSerialVariableB("pedalWasReleased", pedalWasReleased);
 	}
 
 	//	Timing
