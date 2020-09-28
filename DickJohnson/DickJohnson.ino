@@ -20,7 +20,7 @@
 #define EXTRUDE_LENGTH_MULTIPLICATOR 1250
 
 #define STOPPER_THICKNESS 0.375f * positionMultiplicator
-#define STOPPER_PADDING 0.25f * positionMultiplicator
+#define STOPPER_PADDING 0.125f * positionMultiplicator
 #define STOPPER_TIMER 50ul
 
 #define MAX_PRESSURE 768
@@ -1367,6 +1367,7 @@ void LoopAuto() {
 	bool home = PURead(IN_HOME);
 	if (!autoModeHomeWasDown && home) {
 		thisJobRodCount = 0;
+		ClearDisplayCount();
 		UpdateDisplayCount();
 	}
 	autoModeHomeWasDown = home;
@@ -1376,9 +1377,18 @@ void LoopAuto() {
 	if (!autoModeSetLengthWasDown && setLength) {
 		if (displayStats) {
 			displayStats = false;
+
+#ifdef DEBUG_SERIAL
+			Serial.print("Hide extended stats.");
+			Serial.print("\n");
+#endif
 		} else {
 			displayStats = true;
 			displayPressure = false;
+#ifdef DEBUG_SERIAL
+			Serial.print("Display extended stats.");
+			Serial.print("\n");
+#endif
 		}
 	}
 	autoModeSetLengthWasDown = setLength;
@@ -1388,9 +1398,17 @@ void LoopAuto() {
 	if (!autoModeCloseViceWasDown && closeVice) {
 		if (displayPressure) {
 			displayPressure = false;
+#ifdef DEBUG_SERIAL
+			Serial.print("Hide pressure.");
+			Serial.print("\n");
+#endif
 		} else {
 			displayStats = false;
 			displayPressure = true;
+#ifdef DEBUG_SERIAL
+			Serial.print("Display Pressure.");
+			Serial.print("\n");
+#endif
 		}
 	}
 	autoModeCloseViceWasDown = closeVice;
@@ -1628,6 +1646,9 @@ void AutoFirstRunHomePressureCallback() {
 	Serial.print("autoModeBackPos: ");
 	Serial.print(((float)(maxPistonPosition - autoModeBackPos) / (float)positionMultiplicator));
 	Serial.print("\n");
+	Serial.print("autoModeBackPos(REAL): ");
+	Serial.print(autoModeBackPos);
+	Serial.print("\n");
 	Serial.print("autoModeRaiseStopperPos: ");
 	Serial.print(((float)(maxPistonPosition - autoModeRaiseStopperPos) / (float)positionMultiplicator));
 	Serial.print("\n");
@@ -1798,6 +1819,11 @@ void UpdateDisplayExtureLength() {
 		lcd.print(minor);
 		lcd.print("\"");
 	}
+}
+
+void ClearDisplayCount() {
+	lcd.setCursor(2, 1);
+	lcd.print("      ");
 }
 
 void UpdateDisplayCount() {
