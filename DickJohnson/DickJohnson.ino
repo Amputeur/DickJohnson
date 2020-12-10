@@ -96,7 +96,8 @@
 
 #define IN_START_PUMP 32
 #define IN_STOP_PUMP 40
-#define OUT_PUMP 37
+#define OUT_PUMP 4
+#define OUT_PUMP_PRESSURE 37
 
 #define IN_DROP_OIL 30
 #define OUT_DROP_OIL 35
@@ -395,6 +396,7 @@ void setup() {
 	SetupPin(IN_START_PUMP, true, true);
 	SetupPin(IN_STOP_PUMP, true, true);
 	SetupRelay(OUT_PUMP);
+	SetupRelay(OUT_PUMP_PRESSURE);
 
 	SetupRelay(OUT_AUTO_LUBRICANT);
 
@@ -442,6 +444,7 @@ void loop() {
 			initialized = false;
 			pumpStarted = false;
 			RelayWrite(OUT_PUMP, false);
+			RelayWrite(OUT_PUMP_PRESSURE, false);
 
 			currentMessage = MessagePANIC;
 			UpdateDisplayComplete();
@@ -473,14 +476,12 @@ void loop() {
 		pumpStarted = newPumpStarted;
 		
 		if (pumpStarted) {
-#ifndef EXTERNAL_PUMP
 			RelayWrite(OUT_PUMP, true);
-#endif
+			Serial.print("Starting pump\n");
 		} else {
+			Serial.print("Stopping pump\n");
 			StateChangeCleanup();
-#ifndef EXTERNAL_PUMP
 			RelayWrite(OUT_PUMP, false);
-#endif
 			initState = InitStateWaiting;
 			initModeHomeCount = 0;
 		}
@@ -2310,7 +2311,7 @@ void RelayWrite(int relayPin, bool enabled, int ledPin) {
 		case OUT_VALVE_BACKWARD:
 		case OUT_VICE_CLOSE:
 		case OUT_VICE_OPEN:
-			digitalWrite(OUT_PUMP, !enabled);
+			digitalWrite(OUT_PUMP_PRESSURE, !enabled);
 			break;
 		}
 #endif
