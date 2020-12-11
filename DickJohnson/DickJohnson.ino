@@ -1394,9 +1394,22 @@ void LoopAuto() {
 	}
 	autoModeSetLengthWasDown = setLength;
 
-	//	Display current hydraulic pressure.
+	//	Display maximum hydraulic pressure.
 	bool closeVice = PURead(IN_MANUAL_CLOSE_VICE);
-	if (!autoModeCloseViceWasDown && closeVice) {
+
+	if (closeVice) {
+		if (manualViceClosePressTime == 0) {
+			manualViceClosePressTime = millis();
+			autoModeCloseViceWasDown = true;
+		}
+	} else {
+		manualViceClosePressTime = 0;
+		autoModeCloseViceWasDown = false;
+	}
+
+	if (autoModeCloseViceWasDown && ((millis() - manualViceClosePressTime) > NON_CRITICAL_INPUTS_HOLD_TIME)) {
+		autoModeCloseViceWasDown = false;
+
 		if (displayPressure) {
 			displayPressure = false;
 #ifdef DEBUG_SERIAL
@@ -1412,7 +1425,6 @@ void LoopAuto() {
 #endif
 		}
 	}
-	autoModeCloseViceWasDown = closeVice;
 
 	if (displayStats) {
 		if (currentMessage != MessageAutoModeStats) {
